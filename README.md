@@ -19,10 +19,13 @@ records on a site you don't run a backend for. Backup & restore moves data betwe
 | `js/rules.js` | IRS rules engine: thresholds, per-entry evaluation, appraisal grouping, year summary and filing checklist |
 | `js/fmv.js` | Fair-market-value ranges for ~130 commonly donated items, plus the appraisal-group map |
 | `js/data.js` | Storage layer: localStorage entries, IndexedDB receipts, staged backup import/export |
-| `js/config.js` | Site settings: the optional "support this site" tip links |
+| `js/cloud.js` | Cloud layer: sign-in, household ledgers, invitations, private receipts, realtime, versioned sync with conflicts |
+| `supabase/schema.sql` | Database schema, row-level security, storage policies and helper functions for cloud mode |
+| `js/config.js` | Site settings: cloud project keys and the optional "support this site" tip links |
 | `js/app.js` | UI logic |
 | `test/rules.test.js` | Rules-engine tests (`node test/rules.test.js`) |
 | `test/data.test.js` | Storage-layer tests: nested-change signatures, merge conflicts, conflict exclusion (`node test/data.test.js`) |
+| `test/cloud.test.js` | Cloud sync tests against a fake Supabase client: diffing, versions, conflicts, retry, offline queue (`node test/cloud.test.js`) |
 | `test/browser-failure-tests.js` | Failure-mode tests to paste into the browser console on a running copy |
 | `serve.js` | Local preview server (`node serve.js`, then open http://localhost:8765) |
 | `original-donation-tracker.html` | The single-file tracker this replaced, kept for reference |
@@ -46,6 +49,42 @@ Then open http://localhost:8765. Any static server works; the app has no build s
 Drag the folder onto the Netlify dashboard, or connect the repo. No build command, publish directory `/`.
 
 Add a custom domain from either dashboard when you're ready.
+
+## Accounts and household ledgers (cloud mode)
+
+Without cloud settings the app runs in device-only mode. Add a free [Supabase](https://supabase.com)
+project and it gains sign-in, household ledgers shared between people, private receipt storage,
+automatic saving with a status indicator, live updates between devices, and read-only access for an
+accountant. Setup takes about ten minutes:
+
+1. Create a Supabase project (free tier is fine). In **SQL Editor**, paste and run
+   `supabase/schema.sql`. It creates the tables, the row-level-security policies, the private
+   `receipts` storage bucket, and the helper functions.
+2. In **Authentication → URL Configuration**, set the Site URL to where the app is hosted (for
+   example `https://a2raya83.github.io/giving-ledger/`) and add it to the redirect allow list.
+   Magic-link email sign-in is on by default; no password provider is needed.
+3. In **Project Settings → API**, copy the Project URL and the `anon` public key into
+   `js/config.js` under `cloud`. The anon key is designed to ship in client code; the policies in
+   the schema are what protect the data.
+4. Push. The app shows a **Sign in** button. The first sign-in creates a household ledger and offers
+   to copy the browser's records into it, verifying the copy before offering to remove the local one.
+
+How it behaves:
+
+- **Household ledger.** Entries and receipts belong to a household, not a person. Owners invite
+  people by email with a link; members can add and edit; viewers (an accountant) can only read and
+  export. Invitations expire after 14 days and must be accepted by the invited email address.
+- **Saving.** Every change is written through immediately. The pill in the top bar shows Saving,
+  Saved, Save failed (click to retry) or Offline (retries when back online). Unsent writes survive a
+  reload.
+- **Simultaneous edits.** Each entry carries a version. If two devices edit the same entry, the
+  first write wins and the second is kept as an "Import conflict" copy for the user to resolve, the
+  same workflow as backup merges. Other devices see changes live.
+- **Receipts** are stored in a private bucket under the household's folder; only members can read
+  them, via short-lived signed links.
+- **Backups and exports** still work in cloud mode (Replace and Delete-all are disabled on a shared
+  ledger). Merge from a backup uploads its receipts under fresh ids.
+- **Account recovery** is the sign-in email itself: a new magic link restores access.
 
 ## Optional donation ask
 
@@ -125,6 +164,7 @@ Goodwill guide once a year.
 ```bash
 node test/rules.test.js
 node test/data.test.js
+node test/cloud.test.js
 ```
 
 For the failure-mode tests (storage failing midway through a restore, ledger write failing after
@@ -138,9 +178,7 @@ it a second time after the reload to see the final results.
 
 ## Roadmap ideas
 
-- **Accounts and sync** (so a family shares one ledger live): add Supabase or Firebase auth,
-  move entries to a table keyed by user, and receipts to object storage. `js/data.js` is the only
-  file that needs to change. Until then, backup files are a hand-off, not sync.
+- **Read-only share links** for a preparer without an account, and email notifications for invitations.
 - **PDF tax packet**: generate a one-page summary plus receipt images with a client-side PDF library.
 - **Organization lookup**: query the IRS Tax Exempt Organization Search data set to confirm EINs.
 - **Receipt OCR**: extract date, organization and amount from a photo.

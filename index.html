@@ -22,6 +22,9 @@
       <label for="yearFilter">Tax year</label>
       <select id="yearFilter"></select>
     </div>
+    <span class="save-status" id="saveStatus" hidden title=""></span>
+    <select id="householdPick" hidden aria-label="Household"></select>
+    <button class="btn sm primary" id="accountBtn" type="button" hidden>Sign in</button>
     <button class="btn sm" id="backupBtn" type="button">Backup &amp; data</button>
   </div>
   <nav class="tabs" role="tablist" aria-label="Sections">
@@ -41,6 +44,8 @@
     <div><button class="btn sm" id="clearSamples" type="button">Clear sample entries</button></div>
   </div>
   <div class="callout warn" id="conflictBanner" hidden></div>
+  <div class="callout" id="cloudHint" hidden><b>Saved on this device only.</b><span>Sign in to keep your records across devices, share the ledger with your household, and stop worrying about backups.</span><div><button class="btn sm primary" id="cloudSignIn" type="button">Sign in</button></div></div>
+  <div class="callout warn" id="readOnlyBanner" hidden><b>Read-only access.</b><span>You can view and export this household's ledger, but not change it.</span></div>
 
   <!-- ================= LEDGER ================= -->
   <section class="view" id="view-ledger">
@@ -307,14 +312,16 @@
 
 <footer>
   <p class="support-foot" id="supportFooter" hidden></p>
-  <p><b>Your data stays on this device.</b> Entries and receipts are stored in this browser only; nothing is uploaded. Use <b>Backup &amp; data</b> to save a file you can restore on another device, and back up before clearing browser data.</p>
+  <p id="footerStorage"><b>Without an account, your data stays on this device.</b> Entries and receipts are stored in this browser only. Sign in to save them to a household ledger you can open anywhere and share; use <b>Backup &amp; data</b> for a file copy either way.</p>
   <p>Giving Ledger organizes records and explains IRS rules in plain English. It is not tax advice. Confirm deductions with a qualified preparer.</p>
 </footer>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script src="js/config.js"></script>
 <script src="js/fmv.js"></script>
 <script src="js/rules.js"></script>
 <script src="js/data.js"></script>
+<script src="js/cloud.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

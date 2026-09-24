@@ -9,8 +9,12 @@
   const yearOf = e => (e.date || "").slice(0, 4);
   const thisYear = String(new Date().getFullYear());
 
+  let cloudMode = false;                 // true when signed in and a household ledger is open
+  const Cloud = window.Cloud || { configured: false };
+  const Files = () => cloudMode ? Cloud.files : window.Store;   // receipt backend: household storage or this browser
+  const readOnly = () => cloudMode && !Cloud.canWrite();
   let state = window.Store.loadState();
-  let receiptsCache = [];        // all receipt records (blobs) from IndexedDB
+  let receiptsCache = [];        // all receipt records (blobs in device mode, signed urls in cloud mode)
   let objectUrls = [];
   let editingId = null;
   let originalReceiptIds = [];   // receipts the entry had when editing began
@@ -25,18 +29,24 @@
   // Returns true when the state was actually written. Every caller that reports success must check it.
   function persist() {
     state.settings.year = year;
+    if (cloudMode) {
+      if (readOnly()) { toast("This ledger is read-only for you.", true); return false; }
+      try { localStorage.setItem("gl_year", year); } catch (e) {}
+      Cloud.sync(state.entries);            // optimistic: the status pill reports saving / saved / failed
+      return true;
+    }
     const ok = window.Store.saveState(state);
     if (!ok) toast("Couldn't save: browser storage is blocked or full. Your change is NOT stored — export a backup and free up space.", true);
     return ok;
   }
   function freeUrls() { objectUrls.forEach(u => URL.revokeObjectURL(u)); objectUrls = []; }
-  function urlFor(rec) { const u = URL.createObjectURL(rec.blob); objectUrls.push(u); return u; }
-  async function refreshReceipts() { try { receiptsCache = await window.Store.listReceipts(); } catch (e) { receiptsCache = []; toast("Receipt storage is unavailable in this browser; files can't be shown.", true); } }
+  function urlFor(rec) { if (rec.url) return rec.url; const u = URL.createObjectURL(rec.blob); objectUrls.push(u); return u; }
+  async function refreshReceipts() { try { receiptsCache = await Files().listReceipts(); } catch (e) { receiptsCache = []; toast(cloudMode ? "Couldn't load receipts from the household ledger: " + e.message : "Receipt storage is unavailable in this browser; files can't be shown.", true); } }
   const receiptsFor = e => (e.receiptIds || []).map(id => receiptsCache.find(r => r.id === id)).filter(Boolean);
   // Delete a receipt file only if no entry still references it (a conflict copy and its original share files).
   async function releaseReceipt(id) {
     if (state.entries.some(e => (e.receiptIds || []).includes(id))) return false;
-    await window.Store.deleteReceipt(id).catch(() => {}); return true;
+    await Files().deleteReceipt(id).catch(() => {}); return true;
   }
   const ev = e => evaluate(e, { files: receiptsFor(e).length });
   const summarize = entries => yearSummary(entries, { filesFor: e => receiptsFor(e).length });
@@ -232,8 +242,8 @@
     let stored = 0;
     for (const f of files) {
       if (f.size > 25 * 1024 * 1024) { toast(`${f.name} is over 25 MB — skipped`); continue; }
-      try { const rec = await window.Store.addReceipt(f, editingId); pendingReceiptIds.push(rec.id); stored++; }
-      catch (e) { toast(`Couldn't store ${f.name} — receipt storage may be blocked in this browser.`, true); }
+      try { const rec = await Files().addReceipt(f, editingId); pendingReceiptIds.push(rec.id); stored++; }
+      catch (e) { toast(cloudMode ? `Couldn't upload ${f.name}: ${e.message}` : `Couldn't store ${f.name} — receipt storage may be blocked in this browser.`, true); }
     }
     await refreshReceipts(); renderThumbs(); updateInsight(); $("saveHint").textContent = "";
     if (stored && !$("f_ack").checked) $("saveHint").textContent = "Tip: if one of these is the charity's acknowledgment letter, tick the box above.";
@@ -257,6 +267,7 @@
 
   form.addEventListener("submit", async ev => {
     ev.preventDefault();
+    if (readOnly()) { $("saveHint").textContent = "You have read-only access to this ledger."; return; }
     const e = readForm();
     const problems = [];
     const y = Number((e.date || "").slice(0, 4));
@@ -279,7 +290,7 @@
     if (idx >= 0) state.entries[idx] = e; else state.entries.push(e);
     if (!persist()) { if (previous) state.entries[idx] = previous; else state.entries.pop(); $("saveHint").textContent = "Not saved. Your entry is still in the form — export a backup or free up storage, then try again."; return; }
     // Saved. Now finalize receipts: attach current ones, delete staged removals.
-    await window.Store.attachReceipts(e.receiptIds, e.id).catch(() => toast("Saved, but receipt links couldn't be updated.", true));
+    await Files().attachReceipts(e.receiptIds, e.id).catch(() => toast("Saved, but receipt links couldn't be updated.", true));
     for (const id of stagedRemovals) await releaseReceipt(id);
     originalReceiptIds = pendingReceiptIds.slice(); stagedRemovals = [];
     await refreshReceipts();
@@ -300,7 +311,7 @@
       <td><span class="pill k-${e.kind}">${KINDS[e.kind].short}</span></td>
       <td>${e.conflictOf ? `<span class="badge conflict">Import conflict</span> <span class="small muted">not counted</span> ` : ""}${statusBadge(r)}${recs.length ? ` <span class="small muted">📎${recs.length}</span>` : ""}${lost > 0 ? ` <span class="badge warn" title="Receipt file not found in this browser">${lost} file${lost > 1 ? "s" : ""} missing</span>` : ""}</td>
       <td class="r num"><b>${money(r.deductible)}</b>${r.gross !== r.deductible ? `<div class="sub">recorded ${money(r.gross)}</div>` : ""}</td>
-      <td><div class="row-actions">${e.conflictOf ? `<button class="btn sm" data-act="keep" type="button" title="Keep this imported copy and delete your version">Keep this</button><button class="btn sm" data-act="discard" type="button" title="Delete this imported copy, keep your version">Keep mine</button>` : ""}<button class="btn sm" data-act="edit" type="button">Edit</button><button class="btn sm danger" data-act="del" type="button">Delete</button></div></td>
+      <td><div class="row-actions">${readOnly() ? "" : (e.conflictOf ? `<button class="btn sm" data-act="keep" type="button" title="Keep this imported copy and delete your version">Keep this</button><button class="btn sm" data-act="discard" type="button" title="Delete this imported copy, keep your version">Keep mine</button>` : "") + `<button class="btn sm" data-act="edit" type="button">Edit</button><button class="btn sm danger" data-act="del" type="button">Delete</button>`}</div></td>
     </tr>`;
   }
   function renderTable(container, entries, emptyHtml) {
@@ -424,7 +435,7 @@
       const before = JSON.stringify(state.entries);
       state.entries.forEach(e => { if (e.receiptIds) e.receiptIds = e.receiptIds.filter(x => x !== id); });
       if (!persist()) { state.entries = JSON.parse(before); return; }
-      await window.Store.deleteReceipt(id).catch(() => {});
+      await Files().deleteReceipt(id).catch(() => {});
       await refreshReceipts(); renderAll(); toast("Receipt deleted");
     }));
     $("receiptGrid").querySelectorAll("[data-link]").forEach(b => b.addEventListener("click", () => linkReceipt(b.dataset.link)));
@@ -433,11 +444,11 @@
   function linkReceipt(id) {
     const opts = [...state.entries].sort((a, b) => (b.date || "").localeCompare(a.date || "")).map(e => `<option value="${esc(e.id)}">${fmtDate(e.date)} · ${esc(e.org || describe(e))} · ${money(ev(e).deductible)}</option>`).join("");
     const close = modal(`<h3>Link receipt to an entry</h3><p class="small">Pick the gift this file belongs to.</p><div class="field w12" style="margin-top:10px"><select id="linkSel">${opts || "<option value=''>No entries yet</option>"}</select></div><div class="actions"><button class="btn primary" id="linkGo" type="button">Link</button><button class="btn" data-close type="button">Cancel</button></div>`);
-    $("linkGo").addEventListener("click", async () => { const e = state.entries.find(x => x.id === $("linkSel").value); if (!e) return; const before = (e.receiptIds || []).slice(); e.receiptIds = [...before, id]; if (!persist()) { e.receiptIds = before; return; } await window.Store.attachReceipts([id], e.id).catch(() => {}); await refreshReceipts(); close(); renderAll(); toast("Receipt linked"); });
+    $("linkGo").addEventListener("click", async () => { const e = state.entries.find(x => x.id === $("linkSel").value); if (!e) return; const before = (e.receiptIds || []).slice(); e.receiptIds = [...before, id]; if (!persist()) { e.receiptIds = before; return; } await Files().attachReceipts([id], e.id).catch(() => {}); await refreshReceipts(); close(); renderAll(); toast("Receipt linked"); });
   }
   $("looseReceipts").addEventListener("change", async ev => {
     const files = [...ev.target.files]; ev.target.value = ""; if (!files.length) return;
-    let n = 0; for (const f of files) { try { await window.Store.addReceipt(f, null); n++; } catch (e) { toast(`Couldn't store ${f.name}`, true); } }
+    let n = 0; for (const f of files) { try { await Files().addReceipt(f, null); n++; } catch (e) { toast(`Couldn't store ${f.name}: ${e.message}`, true); } }
     await refreshReceipts(); renderAll(); if (n) toast(`${n} file${n > 1 ? "s" : ""} added — link each to an entry`);
   });
 
@@ -531,7 +542,8 @@
       <div class="actions" style="margin-top:8px"><label class="btn">Merge from file <input type="file" id="bkImport" accept="application/json,.json" hidden></label><label class="btn danger">Replace everything from file <input type="file" id="bkReplace" accept="application/json,.json" hidden></label></div>
       <hr style="border:0;border-top:1px solid var(--line);margin:16px 0">
       <div class="actions" style="margin-top:0"><button class="btn" id="bkSamples" type="button">Load sample entries</button><button class="btn danger" id="bkClear" type="button">Delete all data</button><button class="btn" data-close type="button" style="margin-left:auto">Close</button></div>`);
-    const makeBackup = async () => { try { return await window.Store.exportBackup(state); } catch (e) { toast(e.message || "Backup failed", true); return null; } };
+    if (cloudMode) { $("bkReplace").parentElement.hidden = true; $("bkClear").hidden = true; $("bkSamples").hidden = readOnly(); }
+    const makeBackup = async () => { try { return await (cloudMode ? Cloud.exportBackup(state) : window.Store.exportBackup(state)); } catch (e) { toast(e.message || "Backup failed", true); return null; } };
     $("bkDownload").addEventListener("click", async () => { const b = await makeBackup(); if (!b) return; download(`giving-ledger-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(b), "application/json"); toast(`Backup started: ${b.counts.entries} entries, ${b.counts.receipts} receipts${b.counts.missingReceiptFiles ? ` (${b.counts.missingReceiptFiles} referenced files were not found)` : ""}`, true); });
     $("bkCopy").addEventListener("click", async () => { const b = await makeBackup(); if (!b) return; toast((await copyText(JSON.stringify(b))) ? `Backup copied: ${b.counts.entries} entries, ${b.counts.receipts} receipts` : "Copy blocked by the browser", true); });
     const doImport = mode => async ev => {
@@ -539,7 +551,7 @@
       try {
         const json = JSON.parse(await f.text());
         const commit = newState => { const prev = state; state = newState; if (!persist()) { state = prev; return false; } return true; };
-        const res = await window.Store.importBackup(json, state, mode, commit);
+        const res = cloudMode ? await Cloud.importBackup(json, state, commit) : await window.Store.importBackup(json, state, mode, commit);
         await refreshReceipts(); close(); renderYearPicker(); renderAll();
         const parts = mode === "replace" ? [`${res.added} entries and ${res.receiptsAdded} receipts restored`] : [`${res.added} added`, `${res.skipped} unchanged`, `${res.conflicts} conflict${res.conflicts === 1 ? "" : "s"} kept for review`, `${res.receiptsAdded} receipts added`];
         if (res.staleRemoveFailed) parts.push(`${res.staleRemoveFailed} old receipt files could not be removed`);
@@ -592,16 +604,184 @@
   }
 
   /* ---------- boot ---------- */
+  /* ---------- accounts & household ledgers ---------- */
+  const SAVE_LABELS = { saving: "Saving…", saved: "Saved", failed: "Save failed · retry", offline: "Offline · will retry" };
+  function setSaveStatus(s, msg) {
+    const el = $("saveStatus"); el.hidden = !cloudMode; el.dataset.state = s; el.textContent = SAVE_LABELS[s] || s; el.title = msg || "";
+    el.onclick = (s === "failed" || s === "offline") ? () => Cloud.retry() : null;
+  }
+  function renderAccountBar() {
+    const user = Cloud.configured ? Cloud.user() : null;
+    $("accountBtn").hidden = !Cloud.configured;
+    $("accountBtn").textContent = user ? (Cloud.currentHousehold ? Cloud.currentHousehold.name : user.email) : "Sign in";
+    $("householdPick").hidden = true;
+    $("cloudHint").hidden = !(Cloud.configured && !user);
+    $("readOnlyBanner").hidden = !readOnly();
+    $("saveBtn").disabled = readOnly();
+    if (!cloudMode) $("saveStatus").hidden = true;
+  }
+  // Switch the app onto a household ledger (or back to this device).
+  async function openHousehold(hh) {
+    let entries;
+    try { entries = await Cloud.selectHousehold(hh); }
+    catch (e) { toast("Couldn't open the ledger: " + e.message, true); return false; }
+    cloudMode = true;
+    state = { entries, settings: { year: (() => { try { return localStorage.getItem("gl_year"); } catch (e) { return null; } })() || thisYear } };
+    year = state.settings.year;
+    try { localStorage.setItem("gl_household", hh.id); } catch (e) {}
+    await Cloud.restoreQueue();
+    await refreshReceipts(); if (editingId) await resetForm();
+    renderYearPicker(); renderAll(); renderAccountBar(); setSaveStatus(Cloud.pendingWrites() ? "saving" : "saved");
+    return true;
+  }
+  function leaveCloud() {
+    cloudMode = false; state = window.Store.loadState(); year = state.settings.year || thisYear;
+    refreshReceipts().then(() => { renderYearPicker(); renderAll(); renderAccountBar(); });
+  }
+  async function afterSignIn(user) {
+    // pending invitation from the link that brought us here?
+    let token = null; try { token = sessionStorage.getItem("gl_invite"); } catch (e) {}
+    const m = location.hash.match(/invite=([a-f0-9]+)/); if (m) token = m[1];
+    if (token) {
+      try { await Cloud.acceptInvite(token); toast("You've joined the household ledger."); try { sessionStorage.removeItem("gl_invite"); } catch (e) {} history.replaceState(null, "", "#ledger"); }
+      catch (e) { toast(e.message, true); }
+    }
+    let hhs = [];
+    try { hhs = await Cloud.households(); } catch (e) { toast("Couldn't load your households: " + e.message, true); renderAccountBar(); return; }
+    if (!hhs.length) { renderAccountBar(); firstHouseholdModal(); return; }
+    let want = null; try { want = localStorage.getItem("gl_household"); } catch (e) {}
+    const hh = hhs.find(h => h.id === want) || hhs[0];
+    if (await openHousehold(hh)) offerMigration();
+  }
+  function firstHouseholdModal() {
+    const close = modal(`<h3>Name your household ledger</h3><p class="small">Donations live in a household ledger, so a spouse can add to the same records. You can invite people after this step.</p>
+      <div class="field w12" style="margin-top:10px"><label for="hhName">Household name</label><input id="hhName" type="text" placeholder="e.g. The Danavi household" maxlength="120"></div>
+      <div class="actions"><button class="btn primary" id="hhCreate" type="button">Create ledger</button><button class="btn" data-close type="button">Not now</button></div><p class="small muted" id="hhErr"></p>`);
+    $("hhCreate").addEventListener("click", async () => {
+      const name = $("hhName").value.trim(); if (!name) { $("hhErr").textContent = "Give it a name."; return; }
+      try { const id = await Cloud.createHousehold(name); close(); if (await openHousehold({ id, name, role: "owner" })) offerMigration(); }
+      catch (e) { $("hhErr").textContent = e.message; }
+    });
+  }
+  // Offer to copy the browser ledger into the household, verify, and only then offer to remove the local copy.
+  async function offerMigration() {
+    const local = window.Store.loadState(); const real = local.entries.filter(e => !e.sample);
+    if (!real.length || readOnly()) return;
+    let dismissed = false; try { dismissed = sessionStorage.getItem("gl_migrate_dismissed") === "1"; } catch (e) {}
+    if (dismissed) return;
+    let localFiles = []; try { localFiles = await window.Store.listReceipts(); } catch (e) {}
+    const close = modal(`<h3>Bring this device's records into “${esc(Cloud.currentHousehold.name)}”?</h3>
+      <p class="small">This browser holds ${real.length} entr${real.length === 1 ? "y" : "ies"} and ${localFiles.length} receipt file${localFiles.length === 1 ? "" : "s"} saved in device-only mode. They can be copied into the household ledger. Nothing on this device is removed until the copy has been read back and verified.</p>
+      <div class="actions"><button class="btn primary" id="migGo" type="button">Copy into the household ledger</button><button class="btn" id="migNo" type="button">Not now</button></div><p class="small" id="migStatus"></p>`);
+    $("migNo").addEventListener("click", () => { try { sessionStorage.setItem("gl_migrate_dismissed", "1"); } catch (e) {} close(); });
+    $("migGo").addEventListener("click", async () => {
+      $("migGo").disabled = true;
+      try {
+        const res = await Cloud.migrateLocal(local, localFiles, msg => { $("migStatus").textContent = msg; });
+        state.entries = res.all; await refreshReceipts(); renderYearPicker(); renderAll();
+        close();
+        if (res.verified) {
+          const c2 = modal(`<h3>Copied and verified</h3><p class="small">${res.entries} entr${res.entries === 1 ? "y" : "ies"} and ${res.receipts} receipt${res.receipts === 1 ? "" : "s"} were read back from the household ledger successfully${res.skipped ? ` (${res.skipped} already there, skipped)` : ""}. The device-only copy is still on this browser.</p>
+            <div class="actions"><button class="btn danger" id="migClear" type="button">Remove the device copy</button><button class="btn" data-close type="button">Keep it for now</button></div>`);
+          $("migClear").addEventListener("click", async () => { window.Store.saveState({ entries: [], settings: {} }); await window.Store.clearReceipts().catch(() => {}); c2(); toast("Device copy removed. Your records live in the household ledger now."); });
+        } else {
+          modal(`<h3>Copied, but verification found gaps</h3><p class="small">${res.missingEntries.length} entr${res.missingEntries.length === 1 ? "y" : "ies"} and ${res.missingReceipts.length} receipt${res.missingReceipts.length === 1 ? "" : "s"} could not be read back. Nothing on this device was removed. Try again later; entries already copied are skipped.</p><div class="actions"><button class="btn" data-close type="button">Close</button></div>`);
+        }
+      } catch (e) { $("migStatus").textContent = "Stopped: " + e.message + " Nothing on this device was removed."; $("migGo").disabled = false; }
+    });
+  }
+  function accountModal() {
+    const user = Cloud.user();
+    if (!user) {
+      const close = modal(`<h3>Sign in</h3><p class="small">We'll email you a sign-in link. No password to remember. Your records then follow you to any device, and you can share a ledger with your household.</p>
+        <div class="field w12" style="margin-top:10px"><label for="siEmail">Email</label><input id="siEmail" type="email" autocomplete="email" placeholder="you@example.com"></div>
+        <div class="actions"><button class="btn primary" id="siGo" type="button">Email me a link</button><button class="btn" data-close type="button">Cancel</button></div><p class="small" id="siMsg"></p>`);
+      $("siGo").addEventListener("click", async () => {
+        const email = $("siEmail").value.trim(); if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { $("siMsg").textContent = "Enter a valid email address."; return; }
+        $("siGo").disabled = true;
+        try { await Cloud.signInWithEmail(email); $("siMsg").textContent = "Check your email and open the link on this device. You can close this."; }
+        catch (e) { $("siMsg").textContent = e.message; $("siGo").disabled = false; }
+      });
+      setTimeout(() => $("siEmail").focus(), 50);
+      return;
+    }
+    const hh = Cloud.currentHousehold;
+    const close = modal(`<h3>${esc(hh ? hh.name : "Your account")}</h3><p class="small">Signed in as ${esc(user.email)}${hh ? ` · your role: ${hh.role}` : ""}</p>
+      <div id="acctBody" style="margin-top:10px"><p class="small muted">Loading…</p></div>
+      <div class="actions"><button class="btn" id="acctSwitch" type="button">Switch household</button><button class="btn" id="acctOut" type="button">Sign out</button><button class="btn" data-close type="button" style="margin-left:auto">Close</button></div>`, { wide: true });
+    $("acctOut").addEventListener("click", async () => { await Cloud.signOut(); close(); leaveCloud(); toast("Signed out. This browser is back to device-only mode."); });
+    $("acctSwitch").addEventListener("click", async () => {
+      let hhs = []; try { hhs = await Cloud.households(); } catch (e) { toast(e.message, true); return; }
+      $("acctBody").innerHTML = `<h4>Your households</h4><div class="checklist" style="margin-top:8px">${hhs.map(h => `<div class="item"><span class="mk ${hh && h.id === hh.id ? "done" : "na"}">${hh && h.id === hh.id ? "✓" : "–"}</span><span><button class="btn sm link" type="button" data-hh="${esc(h.id)}">${esc(h.name)}</button> <span class="muted small">${h.role}</span></span></div>`).join("")}</div>
+        <div class="actions"><button class="btn sm" id="acctNew" type="button">New household…</button></div>`;
+      $("acctBody").querySelectorAll("[data-hh]").forEach(b => b.addEventListener("click", async () => { const h = hhs.find(x => x.id === b.dataset.hh); close(); if (await openHousehold(h)) offerMigration(); }));
+      $("acctNew").addEventListener("click", () => { close(); firstHouseholdModal(); });
+    });
+    if (!hh) { $("acctBody").innerHTML = `<p class="small">You're not in a household ledger yet.</p>`; return; }
+    (async () => {
+      let members = [], invites = [];
+      try { members = await Cloud.members(); if (hh.role === "owner") invites = await Cloud.invitations(); } catch (e) { $("acctBody").innerHTML = `<p class="small">${esc(e.message)}</p>`; return; }
+      $("acctBody").innerHTML = `<h4>People with access</h4>
+        <div class="checklist" style="margin-top:8px">${members.map(m => `<div class="item"><span class="mk done">✓</span><span>${esc(m.email)} <span class="muted small">${m.role}</span>${hh.role === "owner" && m.user_id !== user.id ? ` <button class="btn sm link" type="button" data-rm="${esc(m.user_id)}">Remove</button>` : ""}</span></div>`).join("")}</div>
+        ${hh.role === "owner" ? `<h4 style="margin-top:14px">Invite someone</h4><p class="small muted">They'll sign in with the email you enter here and open the link you copy.</p>
+          <div class="form-grid" style="margin-top:8px"><div class="field w8"><label for="invEmail">Email</label><input id="invEmail" type="email" placeholder="spouse@example.com"></div><div class="field w4"><label for="invRole">Access</label><select id="invRole"><option value="member">Can add and edit</option><option value="viewer">Read-only (accountant)</option></select></div></div>
+          <div class="actions" style="margin-top:8px"><button class="btn sm primary" id="invGo" type="button">Create invitation link</button></div><p class="small" id="invMsg"></p>
+          ${invites.length ? `<h4 style="margin-top:12px">Pending invitations</h4><div class="checklist" style="margin-top:6px">${invites.map(i => `<div class="item"><span class="mk need">!</span><span>${esc(i.email)} <span class="muted small">${i.role}</span> <button class="btn sm link" type="button" data-copy="${esc(i.token)}">Copy link</button> <button class="btn sm link" type="button" data-revoke="${esc(i.id)}">Revoke</button></span></div>`).join("")}</div>` : ""}` : ""}
+        <div class="actions" style="margin-top:14px"><button class="btn sm" id="hhRename" type="button">Rename household</button></div>`;
+      const linkFor = t => location.origin + location.pathname + "#invite=" + t;
+      $("acctBody").querySelectorAll("[data-copy]").forEach(b => b.addEventListener("click", async () => toast((await copyText(linkFor(b.dataset.copy))) ? "Invitation link copied" : linkFor(b.dataset.copy), true)));
+      $("acctBody").querySelectorAll("[data-revoke]").forEach(b => b.addEventListener("click", async () => { try { await Cloud.revokeInvite(b.dataset.revoke); close(); accountModal(); } catch (e) { toast(e.message, true); } }));
+      $("acctBody").querySelectorAll("[data-rm]").forEach(b => b.addEventListener("click", async () => { if (!b.dataset.confirm) { b.dataset.confirm = "1"; b.textContent = "Confirm remove"; return; } try { await Cloud.removeMember(b.dataset.rm); close(); accountModal(); } catch (e) { toast(e.message, true); } }));
+      const inv = $("invGo"); if (inv) inv.addEventListener("click", async () => {
+        const email = $("invEmail").value.trim(); if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { $("invMsg").textContent = "Enter a valid email address."; return; }
+        try { const r = await Cloud.invite(email, $("invRole").value); const ok = await copyText(r.link); $("invMsg").innerHTML = `Invitation created${ok ? " and link copied" : ""}. Send them this link: <code>${esc(r.link)}</code>`; }
+        catch (e) { $("invMsg").textContent = e.message; }
+      });
+      const rn = $("hhRename"); if (rn) rn.addEventListener("click", async () => {
+        const name = window.prompt ? null : null; // prompt() is unavailable in some hosts; use an inline field
+        $("acctBody").insertAdjacentHTML("beforeend", `<div class="form-grid" style="margin-top:8px"><div class="field w8"><label for="hhNewName">New name</label><input id="hhNewName" type="text" value="${esc(hh.name)}" maxlength="120"></div><div class="field w4" style="justify-content:flex-end"><button class="btn sm primary" id="hhRenameGo" type="button">Save name</button></div></div>`);
+        $("hhRenameGo").addEventListener("click", async () => { try { await Cloud.renameHousehold(hh.id, $("hhNewName").value.trim()); hh.name = $("hhNewName").value.trim(); renderAccountBar(); close(); toast("Household renamed"); } catch (e) { toast(e.message, true); } });
+      });
+    })();
+  }
+  $("accountBtn").addEventListener("click", accountModal);
+  $("cloudHint").addEventListener("click", ev => { if (ev.target.id === "cloudSignIn") accountModal(); });
+
+  /* ---------- boot ---------- */
   (async function init() {
-    const orphans = await window.Store.cleanupOrphans(state).catch(() => 0);
-    await refreshReceipts();
-    if (orphans) toast(`Removed ${orphans} receipt file${orphans > 1 ? "s" : ""} left over from an interrupted restore.`, true);
-    renderYearPicker();
     $("f_date").value = new Date().toISOString().slice(0, 10);
     setKind("cash"); updateExpenseVisibility();
     const v = location.hash.slice(1);
     showView($("view-" + v) ? v : "ledger");
-    renderAll();
+    const im = location.hash.match(/invite=([a-f0-9]+)/); if (im) { try { sessionStorage.setItem("gl_invite", im[1]); } catch (e) {} }
+    // device-mode boot first so the page is usable immediately
+    const orphans = await window.Store.cleanupOrphans(state).catch(() => 0);
+    await refreshReceipts();
+    if (orphans) toast(`Removed ${orphans} receipt file${orphans > 1 ? "s" : ""} left over from an interrupted restore.`, true);
+    renderYearPicker(); renderAll(); renderAccountBar();
     if (!window.Store.saveState(state)) toast("Heads up: this browser is blocking storage, so nothing you enter will be kept.", true);
+    if (Cloud.configured) {
+      try {
+        await Cloud.init({
+          onAuth: user => { if (user) afterSignIn(user); else if (cloudMode) leaveCloud(); else renderAccountBar(); },
+          onStatus: (s, msg) => setSaveStatus(s, msg),
+          onRemoteChange: entries => {
+            const mine = editingId ? entries.find(e => e.id === editingId) : null;
+            const before = editingId ? state.entries.find(e => e.id === editingId) : null;
+            state.entries = entries; refreshReceipts().then(() => { renderYearPicker(); renderAll(); });
+            if (mine && before && window.Store.signature(mine) !== window.Store.signature(before)) toast("The entry you're editing was changed on another device. Saving will keep both versions for review.", true);
+            else toast("Ledger updated from another device");
+          },
+          onConflict: (local, server) => {
+            const idx = state.entries.findIndex(e => e.id === server.id);
+            if (idx >= 0) state.entries[idx] = server; else state.entries.push(server);
+            state.entries.push(Object.assign({}, local, { id: window.Store.uid(), conflictOf: server.id }));
+            renderAll(); toast("Someone else changed this entry at the same time. Both versions are kept — pick one in the ledger.", true);
+            persist();
+          }
+        });
+        if (im && !Cloud.user()) accountModal();
+      } catch (e) { toast("Cloud sign-in is unavailable right now; working in device-only mode.", true); }
+    }
   })();
 })();

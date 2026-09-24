@@ -319,3 +319,12 @@ pre.export { background: var(--surface-2); border-radius: 8px; padding: 10px; fo
   body { background: #fff; color: #000; }
   .card { border-color: #999; break-inside: avoid; }
 }
+
+/* Account / save status */
+.save-status { font-size: 0.78rem; padding: 4px 10px; border-radius: 99px; background: var(--surface-2); color: var(--ink-2); white-space: nowrap; }
+.save-status[data-state="saved"] { background: var(--ok-soft); color: var(--ok); }
+.save-status[data-state="saving"] { background: var(--surface-2); color: var(--ink-2); }
+.save-status[data-state="failed"], .save-status[data-state="offline"] { background: var(--danger-soft); color: var(--danger); cursor: pointer; }
+#cloudHint { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+#cloudHint span { flex: 1; min-width: 200px; }
+code { font-size: 0.8rem; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }

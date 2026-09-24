@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Giving Ledger</title>
+<meta name="description" content="Track charitable donations, volunteer mileage and out-of-pocket expenses with receipts and fair-market-value guidance, organized the way the IRS expects.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,600;12..96,700&family=Public+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<header class="appbar">
+  <div class="appbar-inner">
+    <a class="brand" href="#ledger">
+      <span class="brand-mark">G</span>
+      <span><h1>Giving Ledger</h1><span class="brand-sub">Donations, volunteer costs &amp; receipts for tax time</span></span>
+    </a>
+    <div class="spacer"></div>
+    <div class="yearpick">
+      <label for="yearFilter">Tax year</label>
+      <select id="yearFilter"></select>
+    </div>
+    <button class="btn sm" id="backupBtn" type="button">Backup &amp; data</button>
+  </div>
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button class="tab" role="tab" data-view="ledger" aria-selected="true">Ledger <span class="count" id="countLedger">0</span></button>
+    <button class="tab" role="tab" data-view="volunteer" aria-selected="false">Volunteering <span class="count" id="countVolunteer">0</span></button>
+    <button class="tab" role="tab" data-view="guide" aria-selected="false">Value guide</button>
+    <button class="tab" role="tab" data-view="receipts" aria-selected="false">Receipts <span class="count" id="countReceipts">0</span></button>
+    <button class="tab" role="tab" data-view="summary" aria-selected="false">Tax summary</button>
+    <button class="tab" role="tab" data-view="rules" aria-selected="false">Rules</button>
+  </nav>
+</header>
+
+<main>
+  <div class="callout warn" id="sampleBanner" hidden>
+    <b>You're looking at sample entries.</b>
+    <span>They show how the ledger works. Clear them before you add your own gifts, or keep them as a reference.</span>
+    <div><button class="btn sm" id="clearSamples" type="button">Clear sample entries</button></div>
+  </div>
+
+  <!-- ================= LEDGER ================= -->
+  <section class="view" id="view-ledger">
+    <div class="stats" id="ledgerStats"></div>
+    <div class="card breakdown" id="breakdown"></div>
+
+    <div class="card raised" id="ledgerFormSlot">
+      <div class="card-head">
+        <div><h3 id="formTitle">Record a gift</h3><p>Everything the IRS asks for, captured while you still remember it.</p></div>
+        <button class="btn sm" id="cancelEdit" type="button" hidden>Cancel edit</button>
+      </div>
+      <!-- The entry form is moved into whichever view is active (see app.js) -->
+      <div id="formMount"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div><h3>Logged gifts</h3><p>Deductible amounts already reflect anything you received in return.</p></div>
+        <div class="actions" style="margin:0">
+          <button class="btn sm" id="csvBtn" type="button">Download CSV</button>
+          <button class="btn sm" id="copyCsvBtn" type="button">Copy CSV</button>
+        </div>
+      </div>
+      <div class="filters">
+        <input type="search" id="searchBox" placeholder="Search organization, notes, donor…" aria-label="Search entries">
+        <select id="kindFilter" aria-label="Filter by type"><option value="">All types</option></select>
+        <select id="donorFilter" aria-label="Filter by donor"><option value="">All donors</option></select>
+      </div>
+      <div class="table-wrap" id="ledgerTable"></div>
+    </div>
+  </section>
+
+  <!-- ================= VOLUNTEERING ================= -->
+  <section class="view" id="view-volunteer" hidden>
+    <div class="view-head">
+      <div><h2>Volunteer mileage &amp; out-of-pocket costs</h2><p>Your time is never deductible, but the money you spend to give it usually is. Log each trip or expense and the checker on the right tells you where it stands.</p></div>
+    </div>
+    <div class="stats" id="volunteerStats"></div>
+    <div class="card raised" id="volunteerFormSlot">
+      <div class="card-head">
+        <div><h3 id="volFormTitle">Log a trip or expense</h3><p>Mileage at the statutory 14¢ rate, plus parking, tolls, supplies, travel and more.</p></div>
+      </div>
+      <div id="volFormMount"></div>
+    </div>
+    <div class="summary-grid">
+      <div class="card">
+        <h3>What counts</h3>
+        <ul class="rule-list" style="margin-top:10px">
+          <li><span class="mark yes">✓</span><div><b>Driving for the charity</b><p>14¢ per mile (or actual gas and oil), plus parking and tolls. Delivering meals, driving to your shift, hauling donations, transporting clients.</p></div></li>
+          <li><span class="mark yes">✓</span><div><b>Supplies you buy and don't get reimbursed for</b><p>Stamps, printing, ingredients, materials, phone calls made for the charity.</p></div></li>
+          <li><span class="mark yes">✓</span><div><b>Travel away from home on charity duty</b><p>Air, rail, bus, taxi, lodging and meals when you're on substantial duty throughout the trip. Serving as a delegate at a convention counts.</p></div></li>
+          <li><span class="mark yes">✓</span><div><b>Uniforms with no everyday use</b><p>The required shirt, smock or vest, plus the cost of cleaning it.</p></div></li>
+          <li><span class="mark maybe">?</span><div><b>Travel that mixes duty and pleasure</b><p>Not deductible if there's a significant element of personal pleasure, recreation or vacation. A day or two of sightseeing on a week-long build trip is usually fine; a vacation with a morning of volunteering is not.</p></div></li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>What doesn't</h3>
+        <ul class="rule-list" style="margin-top:10px">
+          <li><span class="mark no">✕</span><div><b>The value of your time or services</b><p>Even a professional donating skilled work can't deduct their hourly rate.</p></div></li>
+          <li><span class="mark no">✕</span><div><b>Local meals during a shift</b><p>Lunch while volunteering in town is personal. Meals only count while away from home overnight.</p></div></li>
+          <li><span class="mark no">✕</span><div><b>Childcare so you can volunteer</b><p>Personal expense, not a gift to the charity.</p></div></li>
+          <li><span class="mark no">✕</span><div><b>Car repairs, insurance, depreciation, registration</b><p>Only gas &amp; oil (or the 14¢ rate) plus parking and tolls.</p></div></li>
+          <li><span class="mark no">✕</span><div><b>Costs of family or friends who tag along</b><p>Only your own share, and only if you're the one performing services.</p></div></li>
+          <li><span class="mark no">✕</span><div><b>Raffle tickets, bingo, lottery</b><p>Games of chance are never charitable contributions.</p></div></li>
+        </ul>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><div><h3>Volunteer log</h3><p>Trips and expenses for the selected tax year.</p></div></div>
+      <div class="table-wrap" id="volunteerTable"></div>
+    </div>
+  </section>
+
+  <!-- ================= VALUE GUIDE ================= -->
+  <section class="view" id="view-guide" hidden>
+    <div class="view-head">
+      <div><h2>Fair market value guide</h2><p>“Fair market value” (FMV) is the price a willing buyer would pay a willing seller for the item in its current condition. For used goods, that's thrift-store money, not what you paid. Pick an item to drop it straight into a goods donation.</p></div>
+    </div>
+    <div class="summary-grid">
+      <div class="callout">
+        <h4>How to value donated goods</h4>
+        <span>1. Start from the range below (based on the valuation guides charities publish). 2. Slide toward the low end for age and wear, the high end for like-new, name-brand or in-demand items. 3. Note the method you used; the IRS asks for it on Form 8283.</span>
+        <span><b>Condition rule:</b> clothing and household items must be in <b>good used condition or better</b>. Worn-out, stained or broken items are worth $0 for tax purposes, no matter what the guide says.</span>
+        <span class="small muted">Ranges reviewed September 2026 against the <a href="https://satruck.org/Home/DonationValueGuide" target="_blank" rel="noopener">Salvation Army Donation Value Guide</a> and regional Goodwill guides; method per <a href="https://www.irs.gov/publications/p561" target="_blank" rel="noopener">IRS Publication 561</a>. Picking an item uses the good-condition value; change the condition on the item row to move it.</span>
+      </div>
+      <div class="callout warn">
+        <h4>When a range isn't enough</h4>
+        <span><b>Over $500 in goods for the year:</b> Form 8283 Section A. Record when and how you got the items and what you paid.</span>
+        <span><b>Any single item (or group of similar items) over $5,000:</b> a qualified appraisal is required, plus Form 8283 Section B. Art, jewelry, collectibles and vehicles have special rules (IRS Publication 561).</span>
+        <span><b>Vehicles over $500:</b> deduction is usually limited to what the charity sells it for; you'll get Form 1098-C.</span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="filters">
+        <input type="search" id="guideSearch" placeholder="Search items (e.g. sofa, jeans, laptop)…" aria-label="Search value guide">
+        <select id="guideCat" aria-label="Category"><option value="">All categories</option></select>
+      </div>
+      <div class="table-wrap"><table class="guide-table"><thead><tr><th>Item</th><th>Category</th><th class="r">Low</th><th class="r">High</th><th></th></tr></thead><tbody id="guideRows"></tbody></table></div>
+    </div>
+  </section>
+
+  <!-- ================= RECEIPTS ================= -->
+  <section class="view" id="view-receipts" hidden>
+    <div class="view-head">
+      <div><h2>Receipts &amp; acknowledgments</h2><p>Every photo, PDF or letter you've attached, in one place. Attach files from the entry form, or drop them here and link them later.</p></div>
+      <label class="btn">Add receipts <input type="file" id="looseReceipts" accept="image/*,application/pdf" multiple hidden></label>
+    </div>
+    <div class="card" id="missingReceipts"></div>
+    <div class="card">
+      <div class="card-head"><div><h3>All receipts</h3><p id="receiptStorage"></p></div></div>
+      <div class="receipt-grid" id="receiptGrid"></div>
+    </div>
+  </section>
+
+  <!-- ================= TAX SUMMARY ================= -->
+  <section class="view" id="view-summary" hidden>
+    <div class="view-head">
+      <div><h2 id="summaryTitle">Tax summary</h2><p>What goes on the return, what forms you'll need, and what's still missing. Hand this and the CSV to your preparer.</p></div>
+      <div class="actions" style="margin:0">
+        <button class="btn sm" id="summaryCsv" type="button">Download CSV</button>
+        <button class="btn sm" id="itemsCsv" type="button">Itemized goods CSV</button>
+        <button class="btn sm" id="summaryCopy" type="button">Copy summary</button>
+        <button class="btn sm" id="summaryPrint" type="button">Print</button>
+      </div>
+    </div>
+    <div class="stats" id="summaryStats"></div>
+    <div class="summary-grid" id="summaryGrid"></div>
+    <div class="card" id="lawNotes">
+      <h3>Rules that shape the number (tax year 2026)</h3>
+      <ul class="rule-list" style="margin-top:10px">
+        <li><span class="mark yes">✓</span><div><b>Don't itemize? You can still deduct cash gifts.</b><p>Starting with 2026 returns, non-itemizers may deduct up to $1,000 of cash gifts ($2,000 married filing jointly) to public charities, on top of the standard deduction. Gifts to donor-advised funds and private foundations don't qualify.</p></div></li>
+          <li><span class="mark maybe">?</span><div><b>Itemizers: a 0.5%-of-AGI floor.</b><p>From 2026, itemized charitable deductions are reduced by 0.5% of adjusted gross income. On $150,000 of AGI, the first $750 of gifts produces no deduction.</p></div></li>
+        <li><span class="mark maybe">?</span><div><b>Annual ceilings.</b><p>Cash gifts to public charities: up to 60% of AGI. Appreciated stock and property: 30% of AGI. Excess carries forward five years. Taxpayers in the 37% bracket get at most 35¢ of benefit per dollar.</p></div></li>
+        <li><span class="mark yes">✓</span><div><b>Charitable mileage stays at 14¢.</b><p>Set by statute, not by the IRS, so it doesn't rise with the business rate.</p></div></li>
+        <li><span class="mark no">✕</span><div><b>Not deductible at all.</b><p>Gifts to individuals (including crowdfunding for a person), political campaigns, most foreign charities, the value of your time, raffle tickets, and dues or tuition that buy you something.</p></div></li>
+      </ul>
+      <p class="small muted" style="margin-top:12px">These notes summarize IRS Publication 526 and the 2025 tax law changes effective for 2026. They are general information, not tax advice; confirm with your preparer.</p>
+    </div>
+    <div class="callout support" id="supportCard" hidden></div>
+  </section>
+
+  <!-- ================= RULES ================= -->
+  <section class="view" id="view-rules" hidden>
+    <div class="view-head"><div><h2>Record-keeping rules, in plain English</h2><p>What you need on file for each kind of gift so the deduction survives an audit.</p></div></div>
+    <div class="summary-grid">
+      <div class="card"><h3>Cash, check, card, payroll</h3>
+        <ul class="rule-list" style="margin-top:10px">
+          <li><span class="mark yes">✓</span><div><b>Any amount</b><p>A bank record (cancelled check, card or bank statement) <i>or</i> a written receipt from the charity showing name, date and amount. No record, no deduction.</p></div></li>
+          <li><span class="mark yes">✓</span><div><b>$250 or more (single gift)</b><p>A contemporaneous written acknowledgment from the charity: amount, whether you received goods or services, and their value. Get it before you file.</p></div></li>
+          <li><span class="mark maybe">?</span><div><b>You got something back</b><p>Gala dinner, auction item, concert tickets: deduct only the amount above the value received. Over $75, the charity must tell you that value in writing.</p></div></li>
+          <li><span class="mark yes">✓</span><div><b>Payroll giving</b><p>Pay stub or W-2 plus the pledge card naming the charity.</p></div></li>
+          <li><span class="mark yes">✓</span><div><b>Text-message gifts</b><p>The phone bill showing the charity, date and amount is your record.</p></div></li>
+        </ul>
+      </div>
+      <div class="card"><h3>Goods &amp; property</h3>
+        <ul class="rule-list" style="margin-top:10px">
+          <li><span class="mark yes">✓</span><div><b>Under $250</b><p>A receipt from the charity (name, date, location, description) unless it's impractical, like a drop box. Keep your own list with condition and value.</p></div></li>
+          <li><span class="mark yes">✓</span><div><b>$250 to $500</b><p>Written acknowledgment describing the property (it doesn't need to state a value) plus whether you received anything in return.</p></div></li>
+          <li><span class="mark yes">✓</span><div><b>$500 to $5,000</b><p>All of the above, plus how and when you acquired the items and your cost. Form 8283 Section A.</p></div></li>
+          <li><span class="mark maybe">?</span><div><b>Over $5,000 (single item or similar group)</b><p>Qualified appraisal, Form 8283 Section B signed by appraiser and charity. Over $500,000, attach the appraisal itself.</p></div></li>
+          <li><span class="mark yes">✓</span><div><b>Stock held over a year</b><p>Deduct full market value (average of high and low on the transfer date), no capital-gains tax. Held a year or less: deduction limited to cost basis.</p></div></li>
+          <li><span class="mark no">✕</span><div><b>Worn-out clothing and household items</b><p>Must be in good used condition or better. Otherwise, $0.</p></div></li>
+        </ul>
+      </div>
+      <div class="card"><h3>Volunteer expenses</h3>
+        <ul class="rule-list" style="margin-top:10px">
+          <li><span class="mark yes">✓</span><div><b>Keep receipts and a log</b><p>Date, organization, purpose, and amount or miles for each item. A mileage log with odometer readings or map distances is fine.</p></div></li>
+          <li><span class="mark yes">✓</span><div><b>$250 or more for one event or trip</b><p>Written acknowledgment from the charity describing the services you provided and whether you got anything in return.</p></div></li>
+          <li><span class="mark no">✕</span><div><b>Anything reimbursed</b><p>If the charity paid you back, there's nothing to deduct.</p></div></li>
+        </ul>
+      </div>
+      <div class="card"><h3>Before you give</h3>
+        <ul class="rule-list" style="margin-top:10px">
+          <li><span class="mark yes">✓</span><div><b>Confirm the charity is qualified</b><p>Search it in the <a href="https://apps.irs.gov/app/eos/" target="_blank" rel="noopener">IRS Tax Exempt Organization Search</a>. Churches and governments qualify without being listed.</p></div></li>
+          <li><span class="mark yes">✓</span><div><b>Date matters</b><p>A check counts when mailed; a card gift when charged; stock when it leaves your account. A December 31 gift belongs to this year even if the charity deposits it in January.</p></div></li>
+          <li><span class="mark yes">✓</span><div><b>Keep records at least 3 years</b><p>From the date you file the return that claims them. Longer for carryforwards.</p></div></li>
+        </ul>
+      </div>
+    </div>
+    <p class="small muted">Sources: IRS Publication 526 (Charitable Contributions), Publication 561 (Determining the Value of Donated Property), Form 8283 instructions. General information only; not tax advice.</p>
+  </section>
+</main>
+
+<!-- Entry form (moved between views) -->
+<form id="entryForm" class="two-col" autocomplete="off" novalidate>
+  <div>
+    <div class="form-grid">
+      <div class="field w12">
+        <label>What kind of gift?</label>
+        <div class="segmented" id="kindPicker"></div>
+      </div>
+      <div class="field w3"><label for="f_date">Date</label><input type="date" id="f_date" required></div>
+      <div class="field w3"><label for="f_donor">Donor</label><input type="text" id="f_donor" list="donorList" placeholder="e.g. Maria, Joint"><datalist id="donorList"></datalist></div>
+      <div class="field w6" data-kinds="cash noncash stock mileage expense"><label for="f_org">Organization</label><input type="text" id="f_org" list="orgList" placeholder="Full legal name of the charity"><datalist id="orgList"></datalist><span class="hint">Must be a qualified 501(c)(3). <a href="https://apps.irs.gov/app/eos/" target="_blank" rel="noopener">Look it up</a></span></div>
+
+      <!-- CASH -->
+      <div class="field w3" data-kinds="cash"><label for="f_amount_cash">Amount given</label><div class="money-input"><input type="number" id="f_amount_cash" min="0" step="0.01" placeholder="0.00"></div></div>
+      <div class="field w3" data-kinds="cash"><label for="f_method">How paid</label><select id="f_method"><option value="card">Credit / debit card</option><option value="check">Check</option><option value="online">Online / app</option><option value="bank">Bank transfer</option><option value="payroll">Payroll deduction</option><option value="text">Text message</option><option value="cash">Cash</option><option value="other">Other</option></select></div>
+      <div class="field w3" data-kinds="cash"><label for="f_checkNo">Check # / confirmation</label><input type="text" id="f_checkNo" placeholder="Optional"></div>
+      <div class="field w3" data-kinds="cash noncash"><label for="f_benefit">Value received in return</label><div class="money-input"><input type="number" id="f_benefit" min="0" step="0.01" placeholder="0.00"></div><span class="hint">Dinner, auction item, tickets, tote bag</span></div>
+      <label class="check" data-kinds="cash"><input type="checkbox" id="f_bankRecord" checked><span>I have a bank record<span class="hint">Cancelled check, card or bank statement, pay stub</span></span></label>
+
+      <!-- NON-CASH -->
+      <div class="field w12" data-kinds="noncash">
+        <label>Items donated</label>
+        <div class="items-head"><span>Description</span><span>Category</span><span>Condition</span><span>Qty</span><span>Each</span><span>Total</span><span></span></div>
+        <div class="items" id="itemRows"></div>
+        <div class="actions" style="margin-top:8px">
+          <button class="btn sm" type="button" id="addItemBtn">+ Add item</button>
+          <button class="btn sm link" type="button" id="openGuideBtn">Find values in the guide</button>
+          <span class="small muted" style="margin-left:auto">Total FMV: <b id="itemsTotal" class="num">$0.00</b></span>
+        </div>
+      </div>
+      <div class="field w6" data-kinds="noncash"><label for="f_howValued">How you determined value</label><select id="f_howValued"></select></div>
+      <div class="field w6" data-kinds="noncash"><label for="f_acquired">How &amp; when acquired, cost (for gifts over $500)</label><input type="text" id="f_acquired" placeholder="e.g. Purchased 2019–2023, approx. $1,200 total"></div>
+      <label class="check" data-kinds="noncash"><input type="checkbox" id="f_vehicle"><span>This is a vehicle, boat or airplane<span class="hint">Special rules; charity issues Form 1098-C</span></span></label>
+      <label class="check" data-kinds="noncash"><input type="checkbox" id="f_appraised"><span>I have a qualified appraisal for these items<span class="hint">Needed when similar items total over $5,000 for the year</span></span></label>
+
+      <!-- STOCK -->
+      <div class="field w4" data-kinds="stock"><label for="f_ticker">Security</label><input type="text" id="f_ticker" placeholder="e.g. 25 sh VTI"></div>
+      <div class="field w4" data-kinds="stock"><label for="f_amount_stock">Fair market value on transfer date</label><div class="money-input"><input type="number" id="f_amount_stock" min="0" step="0.01" placeholder="0.00"></div><span class="hint">Average of the day's high and low × shares</span></div>
+      <div class="field w4" data-kinds="stock"><label for="f_costBasis">Your cost basis</label><div class="money-input"><input type="number" id="f_costBasis" min="0" step="0.01" placeholder="0.00"></div></div>
+      <label class="check" data-kinds="stock"><input type="checkbox" id="f_longTerm" checked><span>Held more than one year<span class="hint">If not, the deduction is limited to cost basis</span></span></label>
+
+      <!-- MILEAGE -->
+      <div class="field w3" data-kinds="mileage"><label for="f_miles">Miles driven</label><input type="number" id="f_miles" min="0" step="0.1" placeholder="0"></div>
+      <div class="field w3" data-kinds="mileage"><label for="f_parkingTolls">Parking &amp; tolls</label><div class="money-input"><input type="number" id="f_parkingTolls" min="0" step="0.01" placeholder="0.00"></div></div>
+      <div class="field w6" data-kinds="mileage"><label for="f_route">Route</label><input type="text" id="f_route" placeholder="Home → food bank warehouse → home"></div>
+      <div class="field w12" data-kinds="mileage"><label for="f_purpose">Purpose</label><input type="text" id="f_purpose" placeholder="e.g. Saturday meal delivery route, board meeting, hauling donated furniture"></div>
+
+      <!-- EXPENSE -->
+      <div class="field w6" data-kinds="expense"><label for="f_expenseCategory">Type of expense</label><select id="f_expenseCategory"></select><span class="hint" id="expenseHint"></span></div>
+      <div class="field w3" data-kinds="expense"><label for="f_amount_expense">Amount (unreimbursed)</label><div class="money-input"><input type="number" id="f_amount_expense" min="0" step="0.01" placeholder="0.00"></div></div>
+      <div class="field w3" data-kinds="expense"><label for="f_expenseDesc">What it was for</label><input type="text" id="f_expenseDesc" placeholder="e.g. Poster printing for 5K"></div>
+      <label class="check" data-kinds="expense"><input type="checkbox" id="f_reimbursed"><span>The charity reimbursed me for this</span></label>
+      <label class="check" data-kinds="expense" data-cats="transport lodging meals"><input type="checkbox" id="f_awayOvernight"><span>I was away from home overnight<span class="hint">Required for lodging and meals</span></span></label>
+      <label class="check" data-kinds="expense" data-cats="transport lodging meals"><input type="checkbox" id="f_personalPleasure"><span>The trip had a significant vacation or recreation element</span></label>
+      <label class="check" data-kinds="expense" data-cats="transport lodging meals"><input type="checkbox" id="f_companions"><span>This amount includes costs for family or friends who weren't volunteering</span></label>
+      <label class="check" data-kinds="expense" data-cats="uniform"><input type="checkbox" id="f_uniformNoGeneralUse"><span>Required uniform with no everyday use</span></label>
+      <label class="check" data-kinds="expense" data-cats="convention"><input type="checkbox" id="f_delegate"><span>I attended as a chosen representative of the charity</span></label>
+
+      <!-- COMMON -->
+      <label class="check w12" data-kinds="cash noncash stock mileage expense"><input type="checkbox" id="f_ack"><span>I have a written acknowledgment from the charity<span class="hint">Required for any single gift or expense of $250 or more. A thank-you letter or year-end statement usually qualifies if it states what you gave and whether you received anything in return.</span></span></label>
+      <div class="field w12"><label for="f_notes">Notes</label><textarea id="f_notes" placeholder="Anything your preparer should know"></textarea></div>
+      <div class="field w12">
+        <label>Receipts, acknowledgment letters, photos</label>
+        <label class="drop" id="dropZone" for="f_files">Drop files here, or tap to choose (photos or PDF). On a phone this opens the camera.</label>
+        <input type="file" id="f_files" accept="image/*,application/pdf" multiple hidden>
+        <div class="thumbs" id="thumbs"></div>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn primary" type="submit" id="saveBtn">Save to ledger</button>
+      <button class="btn" type="button" id="resetBtn">Clear form</button>
+      <span class="small muted" id="saveHint"></span>
+    </div>
+  </div>
+  <aside class="card insight" id="insight" aria-live="polite"></aside>
+</form>
+
+<div id="modalRoot"></div>
+<div class="toast" id="toast" role="status"></div>
+
+<footer>
+  <p class="support-foot" id="supportFooter" hidden></p>
+  <p><b>Your data stays on this device.</b> Entries and receipts are stored in this browser only; nothing is uploaded. Use <b>Backup &amp; data</b> to save a file you can restore on another device, and back up before clearing browser data.</p>
+  <p>Giving Ledger organizes records and explains IRS rules in plain English. It is not tax advice. Confirm deductions with a qualified preparer.</p>
+</footer>
+
+<script src="js/config.js"></script>
+<script src="js/fmv.js"></script>
+<script src="js/rules.js"></script>
+<script src="js/data.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

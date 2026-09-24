@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Family Donation Ledger</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Newsreader:ital,wght@0,400;0,500;1,400&display=swap');
+
+  :root {
+    --ink: #1a1410;
+    --paper: #f4efe6;
+    --paper-2: #ece4d4;
+    --line: #c9bca3;
+    --accent: #5c4022;
+    --gold: #9a7b3f;
+    --green: #3d5a3d;
+    --red: #8a3324;
+    --shadow: rgba(60,45,25,0.12);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Newsreader', Georgia, serif;
+    background: var(--paper);
+    background-image: radial-gradient(circle at 20% 10%, rgba(154,123,63,0.06), transparent 50%),
+                      radial-gradient(circle at 80% 90%, rgba(92,64,34,0.05), transparent 50%);
+    color: var(--ink);
+    line-height: 1.5;
+    min-height: 100vh;
+    padding: 2rem 1rem 4rem;
+  }
+
+  .wrap { max-width: 920px; margin: 0 auto; }
+
+  header {
+    text-align: center;
+    padding-bottom: 1.5rem;
+    border-bottom: 2px solid var(--ink);
+    margin-bottom: 2rem;
+    position: relative;
+  }
+  header::after {
+    content: '';
+    position: absolute;
+    bottom: -7px; left: 0; right: 0;
+    height: 1px; background: var(--ink);
+  }
+  .eyebrow {
+    font-size: 0.7rem;
+    letter-spacing: 0.35em;
+    text-transform: uppercase;
+    color: var(--gold);
+    margin-bottom: 0.6rem;
+  }
+  h1 {
+    font-family: 'Fraunces', serif;
+    font-weight: 500;
+    font-size: clamp(2rem, 6vw, 3.2rem);
+    line-height: 1.05;
+    letter-spacing: -0.01em;
+  }
+  .sub {
+    font-style: italic;
+    color: var(--accent);
+    margin-top: 0.5rem;
+    font-size: 1.05rem;
+  }
+
+  .totals {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    margin-bottom: 2rem;
+  }
+  .stat { background: var(--paper-2); padding: 1.1rem 1rem; text-align: center; }
+  .stat .num {
+    font-family: 'Fraunces', serif;
+    font-size: 1.9rem;
+    font-weight: 600;
+  }
+  .stat .lbl {
+    font-size: 0.68rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-top: 0.2rem;
+  }
+
+  .year-bar {
+    display: flex; align-items: center; gap: 0.75rem;
+    margin-bottom: 1.5rem; flex-wrap: wrap;
+  }
+  .year-bar label { font-size: 0.8rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent); }
+
+  section.card {
+    background: var(--paper-2);
+    border: 1px solid var(--line);
+    padding: 1.6rem;
+    margin-bottom: 2rem;
+    box-shadow: 4px 4px 0 var(--shadow);
+  }
+  section.card h2 {
+    font-family: 'Fraunces', serif;
+    font-weight: 500;
+    font-size: 1.4rem;
+    margin-bottom: 1.2rem;
+    display: flex; align-items: center; gap: 0.5rem;
+  }
+  section.card h2 span { color: var(--gold); font-size: 1rem; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1rem;
+  }
+  .field { display: flex; flex-direction: column; }
+  .field.full { grid-column: 1 / -1; }
+  .field label {
+    font-size: 0.72rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 0.35rem;
+  }
+  .field .hint { font-size: 0.7rem; font-style: italic; color: var(--gold); margin-top: 0.25rem; }
+  input, select, textarea {
+    font-family: 'Newsreader', serif;
+    font-size: 1rem;
+    background: var(--paper);
+    border: 1px solid var(--line);
+    padding: 0.6rem 0.7rem;
+    color: var(--ink);
+    border-radius: 0;
+  }
+  input:focus, select:focus, textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: inset 0 -2px 0 var(--gold);
+  }
+  textarea { resize: vertical; min-height: 58px; }
+
+  .btn {
+    font-family: 'Fraunces', serif;
+    font-size: 0.95rem;
+    letter-spacing: 0.03em;
+    background: var(--ink);
+    color: var(--paper);
+    border: none;
+    padding: 0.7rem 1.6rem;
+    cursor: pointer;
+    margin-top: 1.3rem;
+    transition: transform 0.12s ease, background 0.2s;
+  }
+  .btn:hover { background: var(--accent); transform: translateY(-1px); }
+  .btn.ghost { background: transparent; color: var(--ink); border: 1px solid var(--ink); }
+  .btn.ghost:hover { background: var(--ink); color: var(--paper); }
+
+  .toolbar { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; margin-bottom: 1rem; }
+  .toolbar .btn { margin-top: 0; padding: 0.5rem 1.1rem; font-size: 0.85rem; }
+  .toolbar .spacer { flex: 1; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+  th {
+    text-align: left;
+    font-family: 'Fraunces', serif;
+    font-weight: 600;
+    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    padding: 0.6rem 0.5rem;
+    border-bottom: 2px solid var(--ink);
+  }
+  td { padding: 0.65rem 0.5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:hover td { background: rgba(154,123,63,0.07); }
+  .amt { font-family: 'Fraunces', serif; font-weight: 600; white-space: nowrap; }
+  .tag {
+    display: inline-block;
+    font-size: 0.65rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 0.15rem 0.45rem;
+    border: 1px solid var(--line);
+    background: var(--paper);
+    color: var(--accent);
+  }
+  .tag.noncash { border-color: var(--gold); color: var(--gold); }
+  .del {
+    cursor: pointer; color: var(--red); background: none; border: none;
+    font-size: 1.1rem; font-family: serif; line-height: 1; padding: 0 0.3rem;
+  }
+  .del:hover { font-weight: bold; }
+  .empty { text-align: center; padding: 2.5rem 1rem; font-style: italic; color: var(--accent); }
+
+  .flag {
+    background: rgba(138,51,36,0.08);
+    border-left: 3px solid var(--red);
+    padding: 0.4rem 0.6rem;
+    font-size: 0.78rem;
+    font-style: italic;
+    color: var(--red);
+    margin-top: 0.4rem;
+  }
+
+  .notice {
+    font-size: 0.8rem;
+    color: var(--accent);
+    font-style: italic;
+    text-align: center;
+    margin-top: 2rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--line);
+  }
+  .save-flash {
+    position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%);
+    background: var(--green); color: var(--paper);
+    padding: 0.6rem 1.4rem; font-family: 'Fraunces', serif;
+    box-shadow: 4px 4px 0 var(--shadow); opacity: 0; pointer-events: none;
+    transition: opacity 0.3s; z-index: 50;
+  }
+  .save-flash.show { opacity: 1; }
+
+  @media (max-width: 640px) {
+    .grid { grid-template-columns: 1fr; }
+    table { font-size: 0.82rem; }
+    th.hide-sm, td.hide-sm { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Tax Year Recordkeeping</div>
+    <h1>The Family Donation Ledger</h1>
+    <div class="sub">Every gift, logged the way the IRS likes to see it</div>
+  </header>
+
+  <div class="totals" id="totals"></div>
+
+  <div class="year-bar">
+    <label for="yearFilter">Showing year</label>
+    <select id="yearFilter"></select>
+  </div>
+
+  <section class="card">
+    <h2><span>✎</span> Record a Donation</h2>
+    <div class="grid">
+      <div class="field">
+        <label>Date of gift</label>
+        <input type="date" id="f_date">
+      </div>
+      <div class="field">
+        <label>Donor (family member)</label>
+        <input type="text" id="f_donor" placeholder="e.g. Dad / Joint">
+      </div>
+      <div class="field full">
+        <label>Charitable organization</label>
+        <input type="text" id="f_org" placeholder="Full legal name of the charity">
+        <span class="hint">Must be a qualified 501(c)(3) to be deductible</span>
+      </div>
+      <div class="field">
+        <label>Gift type</label>
+        <select id="f_type">
+          <option value="Cash">Cash / Check / Card</option>
+          <option value="Non-cash">Non-cash (goods, stock)</option>
+          <option value="Mileage">Mileage / Out-of-pocket</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Amount / Fair market value (USD)</label>
+        <input type="number" id="f_amount" placeholder="0.00" min="0" step="0.01">
+      </div>
+      <div class="field">
+        <label>Payment / delivery method</label>
+        <input type="text" id="f_method" placeholder="Check #, credit card, online, in-kind">
+      </div>
+      <div class="field">
+        <label>Receipt on file?</label>
+        <select id="f_receipt">
+          <option value="No">No — need to get one</option>
+          <option value="Yes">Yes</option>
+        </select>
+      </div>
+      <div class="field full">
+        <label>Description &amp; notes</label>
+        <textarea id="f_desc" placeholder="For non-cash: describe items & condition. Note if anything of value was received in return (quid pro quo)."></textarea>
+      </div>
+    </div>
+    <button class="btn" id="addBtn">Add to Ledger</button>
+  </section>
+
+  <section class="card">
+    <h2><span>❧</span> Logged Donations</h2>
+    <div class="toolbar">
+      <button class="btn ghost" id="csvBtn">Export CSV</button>
+      <button class="btn ghost" id="printBtn">Print / Save PDF</button>
+      <div class="spacer"></div>
+    </div>
+    <div style="overflow-x:auto;">
+      <table>
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Organization</th>
+            <th class="hide-sm">Donor</th>
+            <th>Type</th>
+            <th class="hide-sm">Receipt</th>
+            <th style="text-align:right;">Amount</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <div class="notice">
+    This ledger is shared with everyone who has the link — entries are saved automatically and visible to all family members.
+    It helps organize records but is not tax advice; confirm deductions with your preparer. Keep receipts: the IRS requires
+    written acknowledgment for any single gift of $250 or more, and Form 8283 for total non-cash gifts over $500.
+  </div>
+</div>
+
+<div class="save-flash" id="flash">Saved to the family ledger ✓</div>
+
+<script>
+  const KEY = 'family_donations_v1';
+  let donations = [];
+
+  const $ = id => document.getElementById(id);
+  const money = n => '$' + Number(n||0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
+  function flash(msg) {
+    const f = $('flash'); f.textContent = msg; f.classList.add('show');
+    setTimeout(() => f.classList.remove('show'), 1800);
+  }
+
+  async function load() {
+    try {
+      const res = await window.storage.get(KEY, true);
+      donations = res && res.value ? JSON.parse(res.value) : [];
+    } catch (e) {
+      donations = [];
+    }
+    render();
+  }
+
+  async function save() {
+    try {
+      await window.storage.set(KEY, JSON.stringify(donations), true);
+    } catch (e) {
+      flash('Could not save — try again');
+    }
+  }
+
+  function currentYear() { return $('yearFilter').value || 'all'; }
+
+  function buildYearOptions() {
+    const sel = $('yearFilter');
+    const prev = sel.value;
+    const years = [...new Set(donations.map(d => (d.date||'').slice(0,4)).filter(Boolean))].sort().reverse();
+    sel.innerHTML = '<option value="all">All years</option>' +
+      years.map(y => `<option value="${y}">${y}</option>`).join('');
+    if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+  }
+
+  function visible() {
+    const y = currentYear();
+    return donations.filter(d => y === 'all' || (d.date||'').slice(0,4) === y);
+  }
+
+  function render() {
+    buildYearOptions();
+    const vis = visible();
+
+    const total = vis.reduce((s,d) => s + Number(d.amount||0), 0);
+    const cash = vis.filter(d => d.type === 'Cash').reduce((s,d)=>s+Number(d.amount||0),0);
+    const noncash = vis.filter(d => d.type !== 'Cash').reduce((s,d)=>s+Number(d.amount||0),0);
+    const missing = vis.filter(d => d.receipt !== 'Yes' && Number(d.amount||0) >= 250).length;
+
+    $('totals').innerHTML = `
+      <div class="stat"><div class="num">${money(total)}</div><div class="lbl">Total Deductible</div></div>
+      <div class="stat"><div class="num">${money(cash)}</div><div class="lbl">Cash Gifts</div></div>
+      <div class="stat"><div class="num">${money(noncash)}</div><div class="lbl">Non-Cash &amp; Other</div></div>
+      <div class="stat"><div class="num">${vis.length}</div><div class="lbl">Entries</div></div>`;
+
+    const rows = $('rows');
+    if (!vis.length) {
+      rows.innerHTML = '<tr><td colspan="7" class="empty">No donations logged yet for this period. Add your first gift above.</td></tr>';
+      return;
+    }
+    const sorted = [...vis].sort((a,b) => (b.date||'').localeCompare(a.date||''));
+    rows.innerHTML = sorted.map(d => {
+      const big250 = Number(d.amount||0) >= 250 && d.receipt !== 'Yes';
+      const noncash500 = d.type === 'Non-cash' && Number(d.amount||0) > 500;
+      let flags = '';
+      if (big250) flags += `<div class="flag">Gift ≥ $250 — written acknowledgment from the charity required.</div>`;
+      if (noncash500) flags += `<div class="flag">Non-cash &gt; $500 — IRS Form 8283 needed at filing.</div>`;
+      return `<tr>
+        <td>${d.date || '—'}</td>
+        <td>${esc(d.org) || '—'}${d.desc ? `<div style="font-size:0.8rem;color:#5c4022;font-style:italic;">${esc(d.desc)}</div>`:''}${flags}</td>
+        <td class="hide-sm">${esc(d.donor) || '—'}</td>
+        <td><span class="tag ${d.type==='Non-cash'?'noncash':''}">${d.type}</span></td>
+        <td class="hide-sm">${d.receipt === 'Yes' ? '✓' : '—'}</td>
+        <td class="amt" style="text-align:right;">${money(d.amount)}</td>
+        <td><button class="del" data-id="${d.id}" title="Delete">×</button></td>
+      </tr>`;
+    }).join('');
+
+    rows.querySelectorAll('.del').forEach(b => b.onclick = async () => {
+      if (confirm('Remove this donation from the ledger?')) {
+        donations = donations.filter(x => x.id !== b.dataset.id);
+        await save(); render(); flash('Entry removed');
+      }
+    });
+  }
+
+  function esc(s){ return (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+  $('addBtn').onclick = async () => {
+    const org = $('f_org').value.trim();
+    const amount = $('f_amount').value;
+    if (!org || !amount) { alert('Please enter at least the organization and amount.'); return; }
+    donations.push({
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2,6),
+      date: $('f_date').value,
+      donor: $('f_donor').value.trim(),
+      org, type: $('f_type').value,
+      amount: parseFloat(amount) || 0,
+      method: $('f_method').value.trim(),
+      receipt: $('f_receipt').value,
+      desc: $('f_desc').value.trim()
+    });
+    await save();
+    ['f_org','f_donor','f_amount','f_method','f_desc'].forEach(id => $(id).value = '');
+    render(); flash('Saved to the family ledger ✓');
+  };
+
+  $('yearFilter').onchange = render;
+
+  $('csvBtn').onclick = () => {
+    const vis = visible();
+    if (!vis.length) { alert('Nothing to export.'); return; }
+    const cols = ['Date','Donor','Organization','Type','Amount (FMV)','Method','Receipt on file','Description/Notes'];
+    const lines = [cols.join(',')];
+    [...vis].sort((a,b)=>(a.date||'').localeCompare(b.date||'')).forEach(d => {
+      const row = [d.date, d.donor, d.org, d.type, d.amount, d.method, d.receipt, d.desc]
+        .map(v => `"${String(v||'').replace(/"/g,'""')}"`);
+      lines.push(row.join(','));
+    });
+    const blob = new Blob([lines.join('\n')], {type:'text/csv'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `donations_${currentYear()}.csv`;
+    a.click();
+  };
+
+  $('printBtn').onclick = () => window.print();
+
+  if (!$('f_date').value) $('f_date').valueAsDate = new Date();
+  load();
+</script>
+</body>
+</html>

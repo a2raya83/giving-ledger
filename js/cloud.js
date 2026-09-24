@@ -24,7 +24,13 @@
     handlers = Object.assign(handlers, h || {});
     const { data } = await sb.auth.getSession();
     session = data.session || null;
-    sb.auth.onAuthStateChange((_event, s) => { const was = !!session; session = s; if (!!s !== was || (s && session && s.user.id !== session.user.id)) handlers.onAuth(Cloud.user()); });
+    sb.auth.onAuthStateChange((_event, s) => {
+      const prevId = session && session.user ? session.user.id : null;
+      const nextId = s && s.user ? s.user.id : null;
+      if (prevId !== nextId) { persistQueue(); queue = []; draining = false; }   // pending work belongs to the previous user; park it under their key
+      const was = !!session; session = s;
+      if (!!s !== was || prevId !== nextId) handlers.onAuth(Cloud.user());
+    });
     handlers.onAuth(Cloud.user());
     return Cloud.user();
   };
@@ -35,13 +41,19 @@
     if (error) throw new Error(error.message);
     return true;
   };
-  Cloud.signOut = async function () { await unsubscribe(); Cloud.currentHousehold = null; known = new Map(); await sb.auth.signOut(); };
+  Cloud.signOut = async function () {
+    persistQueue(); queue = []; draining = false;        // park unsent edits under this user's key; nobody else can drain them
+    await unsubscribe(); Cloud.currentHousehold = null; known = new Map();
+    await sb.auth.signOut();
+  };
 
   /* ---------------- households & access ---------------- */
   Cloud.households = async function () {
-    const { data, error } = await sb.from("household_members").select("role, households(id, name, created_at, plan, plan_status, plan_renews_at, canceled_at)").order("joined_at");
+    if (!session || !session.user) return [];
+    const { data, error } = await sb.from("household_members").select("role, households(id, name, created_at, plan, plan_status, plan_renews_at, canceled_at)").eq("user_id", session.user.id).order("joined_at");
     if (error) throw new Error(error.message);
-    return (data || []).filter(r => r.households).map(r => ({ id: r.households.id, name: r.households.name, role: r.role, plan: r.households.plan || "household", planStatus: r.households.plan_status || "beta", renewsAt: r.households.plan_renews_at, canceledAt: r.households.canceled_at }));
+    const seen = new Set();
+    return (data || []).filter(r => r.households && !seen.has(r.households.id) && seen.add(r.households.id)).map(r => ({ id: r.households.id, name: r.households.name, role: r.role, plan: r.households.plan || "household", planStatus: r.households.plan_status || "beta", renewsAt: r.households.plan_renews_at, canceledAt: r.households.canceled_at }));
   };
   Cloud.createHousehold = async function (name) {
     const { data, error } = await sb.rpc("create_household", { p_name: name });
@@ -91,6 +103,7 @@
     return entries;
   }
   Cloud.selectHousehold = async function (hh) {
+    if (Cloud.currentHousehold && Cloud.currentHousehold.id !== hh.id) { persistQueue(); queue = []; draining = false; }   // pending work stays with its own household
     await unsubscribe();
     Cloud.currentHousehold = hh;
     const entries = await fetchEntries();
@@ -280,7 +293,9 @@
         idMap.set(r.id, rec.id); receiptsAdded++;
       } catch (e) { failed.push(r && r.name ? r.name : "(unnamed)"); }
     }
-    incoming.forEach(e => { e.receiptIds = (e.receiptIds || []).map(id => idMap.get(id) || id).filter(id => idMap.has(id) ? true : known.has(id) || state.entries.some(x => (x.receiptIds || []).includes(id))); });
+    let existingFiles = new Set();
+    try { existingFiles = new Set((await Cloud.files.listReceipts()).map(r => r.id)); } catch (e) { /* treated as none */ }
+    incoming.forEach(e => { e.receiptIds = (e.receiptIds || []).filter(id => idMap.has(id) || existingFiles.has(id)).map(id => idMap.get(id) || id); });
     const result = window.Store.mergeEntries(state.entries, incoming);
     if (!commit({ entries: result.entries, settings: state.settings })) throw new Error("Couldn't save the merged ledger.");
     for (const e of result.entries) { const mine = (e.receiptIds || []).filter(id => [...idMap.values()].includes(id)); if (mine.length) await Cloud.files.attachReceipts(mine, e.id).catch(() => {}); }
@@ -291,11 +306,14 @@
   // Copies local entries + receipt files into the current household, then READS EVERYTHING BACK and
   // verifies it before reporting success. Nothing local is removed here; the app offers that only
   // after verification. Entries that already exist in the household (same id) are skipped.
+  const sha256 = async blob => { const buf = await blob.arrayBuffer(); const h = await crypto.subtle.digest("SHA-256", buf); return [...new Uint8Array(h)].map(b => b.toString(16).padStart(2, "0")).join(""); };
   Cloud.migrateLocal = async function (localState, localReceipts, onProgress) {
     const hid = Cloud.currentHousehold.id;
     const progress = msg => { try { (onProgress || (() => {}))(msg); } catch (e) {} };
     const entries = localState.entries.filter(e => !e.sample);
-    const existing = new Set(known.keys());
+    const current = await fetchEntries();                        // what the household holds right now
+    const currentById = new Map(current.map(e => [e.id, e]));
+    const existing = new Set(currentById.keys());
     const referenced = new Set(entries.flatMap(e => e.receiptIds || []));
     const files = localReceipts.filter(r => referenced.has(r.id) || !r.entryId);
     const idMap = new Map();
@@ -314,7 +332,24 @@
       if (error) { await sb.storage.from(BUCKET).remove([path]).catch(() => {}); throw new Error("Could not record " + r.name + ": " + error.message); }
       idMap.set(r.id, id); uploaded++;
     }
-    const rows = entries.filter(e => !existing.has(e.id)).map(e => { const body = Object.assign({}, e, { receiptIds: (e.receiptIds || []).map(id => idMap.get(id) || id) }); delete body.id; delete body.sample; return { id: e.id, household_id: hid, body, version: 1 }; });
+    // Same id already in the household: identical content → skip; different content → keep the local
+    // version as an import-conflict copy (never silently drop it, never overwrite the household's).
+    const rows = []; let skipped = 0, conflicts = 0;
+    for (const e of entries) {
+      const mapped = Object.assign({}, e, { receiptIds: (e.receiptIds || []).map(id => idMap.get(id) || id) }); delete mapped.sample;
+      if (existing.has(e.id)) {
+        if (sig(window.Store.sanitizeEntry(mapped)) === sig(currentById.get(e.id))) { skipped++; continue; }
+        // a retry must not create a second conflict copy of the same local version
+        const sameContent = (x, y) => sig(Object.assign({}, window.Store.sanitizeEntry(x), { id: "", conflictOf: "" })) === sig(Object.assign({}, window.Store.sanitizeEntry(y), { id: "", conflictOf: "" }));
+        if (current.some(c => c.conflictOf === e.id && sameContent(c, mapped))) { skipped++; continue; }
+        const copy = Object.assign({}, mapped, { id: uid(), conflictOf: e.id });
+        const body = Object.assign({}, copy); delete body.id;
+        rows.push({ id: copy.id, household_id: hid, body, version: 1 }); conflicts++;
+      } else {
+        const body = Object.assign({}, mapped); delete body.id;
+        rows.push({ id: e.id, household_id: hid, body, version: 1 });
+      }
+    }
     progress(`Saving ${rows.length} entries…`);
     for (let i = 0; i < rows.length; i += 50) {
       const { error } = await sb.from("entries").insert(rows.slice(i, i + 50));
@@ -322,15 +357,25 @@
     }
     // link uploaded receipts to their entries
     for (const row of rows) for (const rid of row.body.receiptIds || []) { if ([...idMap.values()].includes(rid)) await sb.from("receipts").update({ entry_id: row.id }).eq("household_id", hid).eq("id", rid); }
-    // verify: every entry id and every uploaded receipt must be readable from the server
-    progress("Verifying…");
+    // verify: every saved entry must read back with the same content, and every receipt file the
+    // local ledger references must download from the household with matching bytes (SHA-256).
+    progress("Verifying entries…");
     const fresh = await fetchEntries();
-    const missingEntries = rows.filter(r => !fresh.some(e => e.id === r.id)).map(r => r.id);
-    const { data: recRows, error: recErr } = await sb.from("receipts").select("id").eq("household_id", hid).in("id", [...idMap.values()].length ? [...idMap.values()] : ["-"]);
-    if (recErr) throw new Error(recErr.message);
-    const missingReceipts = [...idMap.values()].filter(id => !(recRows || []).some(r => r.id === id));
+    const freshById = new Map(fresh.map(e => [e.id, e]));
+    const missingEntries = rows.filter(r => { const got = freshById.get(r.id); return !got || sig(got) !== sig(window.Store.sanitizeEntry(Object.assign({}, r.body, { id: r.id }))); }).map(r => r.id);
+    const missingReceipts = [];
+    const referencedLocal = [...new Set(entries.flatMap(e => e.receiptIds || []))].filter(id => idMap.has(id));
+    let n = 0;
+    for (const localId of referencedLocal) {
+      n++; progress(`Verifying receipt ${n} of ${referencedLocal.length}…`);
+      const local = localReceipts.find(r => r.id === localId); const cloudId = idMap.get(localId);
+      try {
+        const remote = await Cloud.files.fetchBlob({ id: cloudId, path: pathFor(cloudId) });
+        if (!local || !remote || (await sha256(remote)) !== (await sha256(local.blob))) missingReceipts.push(cloudId);
+      } catch (e) { missingReceipts.push(cloudId); }
+    }
     const verified = !missingEntries.length && !missingReceipts.length;
-    return { entries: rows.length, skipped: entries.length - rows.length, receipts: uploaded, receiptsReused: reused, verified, missingEntries, missingReceipts, all: fresh };
+    return { entries: rows.length - conflicts, conflicts, skipped, receipts: uploaded, receiptsReused: reused, verified, missingEntries, missingReceipts, all: fresh };
   };
 
   window.Cloud = Cloud;

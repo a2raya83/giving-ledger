@@ -122,6 +122,12 @@ How it behaves:
 - **Backups and exports** still work in cloud mode (Replace and Delete-all are disabled on a shared
   ledger). Merge from a backup uploads its receipts under fresh ids.
 - **Account recovery** is the sign-in email itself: a new magic link restores access.
+- **Account switching on one browser.** Unsent edits are parked under the user and household they
+  belong to, in storage and in memory. Another person signing in, a retry, a reconnect, or switching
+  households can never submit them; they resume only when that person opens that household again.
+- **Migration** treats a local entry whose id already exists in the household as identical (skipped)
+  or different (kept as an import conflict); it never overwrites or drops it. Every referenced receipt
+  is downloaded back and compared by SHA-256 before the app offers to remove the device copy.
 
 ## Optional donation ask
 

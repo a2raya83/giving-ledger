@@ -58,3 +58,23 @@ window.FMV_METHODS = [
   "Catalog / dealer price for used items",
   "Other (describe in notes)"
 ];
+
+// Appraisal groups: "similar items" for the IRS $5,000 aggregation test are grouped by kind of
+// property, not by the shopping category above. Guide category → group.
+window.FMV_GROUPS = {
+  "Women's clothing": "Clothing", "Men's clothing": "Clothing", "Children's clothing": "Clothing",
+  "Furniture": "Furniture", "Appliances": "Appliances", "Electronics": "Electronics",
+  "Sporting goods & outdoor": "Sporting goods", "Household & kitchen": "Household items",
+  "Books, media & toys": "Toys & games",   // default for the mixed category; keywords below split it
+  "Art & collectibles": "Art & collectibles", "Jewelry & watches": "Jewelry", "Vehicles": "Vehicles", "Other": "Other"
+};
+// Keyword overrides checked against the item description, first match wins.
+window.FMV_GROUP_KEYWORDS = [
+  [/\b(book|textbook|paperback|hardcover|novel|encyclopedia)s?\b/, "Books"],
+  [/\b(dvd|blu-?ray|cd|vinyl|record|video game|cassette)s?\b/, "Media"],
+  [/\b(painting|print|sculpture|artwork|antique|collectible|coin|stamp)s?\b/, "Art & collectibles"],
+  [/\b(ring|necklace|bracelet|earring|watch|jewel)s?\b/, "Jewelry"],
+  [/\b(car|truck|suv|van|boat|trailer|motorcycle|airplane)\b(?! seat)/, "Vehicles"]
+];
+// Extra categories offered on the item row that have no guide values (appraisal-relevant property).
+window.FMV_EXTRA_CATEGORIES = ["Art & collectibles", "Jewelry & watches", "Vehicles"];

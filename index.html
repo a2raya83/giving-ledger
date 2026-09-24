@@ -40,6 +40,7 @@
     <span>They show how the ledger works. Clear them before you add your own gifts, or keep them as a reference.</span>
     <div><button class="btn sm" id="clearSamples" type="button">Clear sample entries</button></div>
   </div>
+  <div class="callout warn" id="conflictBanner" hidden></div>
 
   <!-- ================= LEDGER ================= -->
   <section class="view" id="view-ledger">
@@ -282,6 +283,7 @@
       <label class="check" data-kinds="expense" data-cats="convention"><input type="checkbox" id="f_delegate"><span>I attended as a chosen representative of the charity</span></label>
 
       <!-- COMMON -->
+      <label class="check" data-kinds="cash noncash stock mileage expense"><input type="checkbox" id="f_hasReceipt"><span>I have a receipt or record for this<span class="hint">Paper or digital. Attaching a photo below also counts.</span></span></label>
       <label class="check w12" data-kinds="cash noncash stock mileage expense"><input type="checkbox" id="f_ack"><span>I have a written acknowledgment from the charity<span class="hint">Required for any single gift or expense of $250 or more. A thank-you letter or year-end statement usually qualifies if it states what you gave and whether you received anything in return.</span></span></label>
       <div class="field w12"><label for="f_notes">Notes</label><textarea id="f_notes" placeholder="Anything your preparer should know"></textarea></div>
       <div class="field w12">

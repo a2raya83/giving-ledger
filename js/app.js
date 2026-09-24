@@ -65,7 +65,7 @@
     if (e.kind === "expense") return `${(EXP[e.expenseCategory] || EXP.other).label}${e.expenseDesc ? " · " + e.expenseDesc : ""}`;
     return e.method ? ({ card: "Card", check: "Check" + (e.checkNo ? " #" + e.checkNo : ""), online: "Online", bank: "Bank transfer", payroll: "Payroll", text: "Text gift", cash: "Cash", other: "" }[e.method] || "") : "";
   };
-  const statusBadge = r => r.status === "stop" ? `<span class="badge stop">Not deductible</span>` : r.status === "warn" ? `<span class="badge warn">Needs attention</span>` : `<span class="badge ok">Records OK</span>`;
+  const statusBadge = r => r.status === "stop" ? `<span class="badge stop">Not eligible</span>` : r.status === "docs" ? `<span class="badge docs">Documentation needed</span>` : `<span class="badge ok">Records OK</span>`;
   const yearLabel = () => year === "all" ? "all years" : year;
 
   /* ---------- year picker ---------- */
@@ -121,7 +121,7 @@
 
   // Non-cash item rows. A row created from the value guide remembers its low/high range so the
   // condition picker can move the value: excellent → high, good → midpoint, fair → low.
-  const catOptions = () => `<option value="">Category</option>` + window.FMV_GUIDE.map(g => `<option>${esc(g.cat)}</option>`).join("") + `<option>Other</option>`;
+  const catOptions = () => `<option value="">Category</option>` + window.FMV_GUIDE.map(g => `<option>${esc(g.cat)}</option>`).join("") + (window.FMV_EXTRA_CATEGORIES || []).map(c => `<option>${esc(c)}</option>`).join("") + `<option>Other</option>`;
   const condOptions = sel => window.FMV_CONDITIONS.map(([v, l]) => `<option value="${v}" ${v === sel ? "selected" : ""}>${l.split(" — ")[0]}</option>`).join("");
   const valueForCondition = (cond, lo, hi) => cond === "excellent" ? hi : cond === "fair" ? lo : (lo + hi) / 2;
   function addItemRow(it = {}) {
@@ -162,7 +162,7 @@
   function readForm() {
     const e = {
       id: editingId || window.Store.uid(), kind: currentKind, date: $("f_date").value, donor: $("f_donor").value.trim(), org: $("f_org").value.trim(),
-      notes: $("f_notes").value.trim(), ackReceived: $("f_ack").checked, receiptIds: pendingReceiptIds.slice()
+      notes: $("f_notes").value.trim(), ackReceived: $("f_ack").checked, hasReceiptDecl: $("f_hasReceipt").checked, receiptIds: pendingReceiptIds.slice()
     };
     if (currentKind === "cash") Object.assign(e, { amount: num($("f_amount_cash").value), method: $("f_method").value, checkNo: $("f_checkNo").value.trim(), benefit: num($("f_benefit").value), bankRecord: $("f_bankRecord").checked });
     if (currentKind === "noncash") Object.assign(e, { items: readItems(), amount: 0, benefit: num($("f_benefit").value), howValued: $("f_howValued").value, acquired: $("f_acquired").value.trim(), vehicle: $("f_vehicle").checked, appraised: $("f_appraised").checked });
@@ -174,7 +174,7 @@
   async function fillForm(e) {
     await resetForm(false);
     editingId = e.id; setKind(e.kind);
-    $("f_date").value = e.date || ""; $("f_donor").value = e.donor || ""; $("f_org").value = e.org || ""; $("f_notes").value = e.notes || ""; $("f_ack").checked = !!e.ackReceived;
+    $("f_date").value = e.date || ""; $("f_donor").value = e.donor || ""; $("f_org").value = e.org || ""; $("f_notes").value = e.notes || ""; $("f_ack").checked = !!e.ackReceived; $("f_hasReceipt").checked = !!e.hasReceiptDecl;
     originalReceiptIds = (e.receiptIds || []).slice(); pendingReceiptIds = originalReceiptIds.slice(); stagedRemovals = [];
     if (e.kind === "cash") { $("f_amount_cash").value = e.amount || ""; $("f_method").value = e.method || "card"; $("f_checkNo").value = e.checkNo || ""; $("f_benefit").value = e.benefit || ""; $("f_bankRecord").checked = e.bankRecord !== false; }
     if (e.kind === "noncash") { $("itemRows").innerHTML = ""; (e.items || []).forEach(addItemRow); if (!(e.items || []).length) addItemRow(); $("f_benefit").value = e.benefit || ""; $("f_howValued").value = e.howValued || window.FMV_METHODS[0]; $("f_acquired").value = e.acquired || ""; $("f_vehicle").checked = !!e.vehicle; $("f_appraised").checked = !!e.appraised; }
@@ -206,7 +206,7 @@
 
   function updateInsight() {
     const e = readForm(); const r = evaluate(e, { files: pendingReceiptIds.filter(id => receiptsCache.some(x => x.id === id)).length });
-    const headline = r.status === "stop" ? "Not deductible as entered" : r.status === "warn" ? "Deductible, records incomplete" : "Deductible, records complete";
+    const headline = r.status === "stop" ? "Not eligible as entered" : r.status === "docs" ? "Eligible — documentation needed before filing" : "Eligible, records complete";
     const flags = r.flags.length ? r.flags : [{ level: "info", text: currentKind === "mileage" ? `Log the miles and purpose. ${num(e.miles)} miles × 14¢ = ${money(num(e.miles) * RULES.MILEAGE_RATE)}.` : "Fill in the gift and the checker will list what records you need." }];
     $("insight").innerHTML = `<div class="eyebrow">Deduction check</div>
       <div class="verdict ${r.status}">${money(r.deductible)}</div>
@@ -275,7 +275,7 @@
     if (yearOf(e) !== year && year !== "all") year = yearOf(e);
     persist(); const k = e.kind; await resetForm(); setKind(k); renderAll();
     const r = ev2(e);
-    toast(idx >= 0 ? "Entry updated" : r.status === "stop" ? "Saved — not deductible as entered (see status)" : r.status === "warn" ? "Saved — some records still needed" : "Saved to the ledger");
+    toast(idx >= 0 ? "Entry updated" : r.status === "stop" ? "Saved — not eligible as entered (see status)" : r.status === "docs" ? "Saved — documentation still needed" : "Saved to the ledger");
   });
   const ev2 = e => ev(e);
 
@@ -287,9 +287,9 @@
       <td><div class="org">${esc(e.org || (e.kind === "mileage" || e.kind === "expense" ? "(volunteering)" : "—"))}</div><div class="sub">${esc(describe(e))}${e.notes && e.kind !== "noncash" ? " · " + esc(e.notes) : ""}</div></td>
       <td>${esc(e.donor || "—")}</td>
       <td><span class="pill k-${e.kind}">${KINDS[e.kind].short}</span></td>
-      <td>${statusBadge(r)}${recs.length ? ` <span class="small muted">📎${recs.length}</span>` : ""}${lost > 0 ? ` <span class="badge warn" title="Receipt file not found in this browser">${lost} file${lost > 1 ? "s" : ""} missing</span>` : ""}</td>
+      <td>${e.conflictOf ? `<span class="badge conflict">Import conflict</span> ` : ""}${statusBadge(r)}${recs.length ? ` <span class="small muted">📎${recs.length}</span>` : ""}${lost > 0 ? ` <span class="badge warn" title="Receipt file not found in this browser">${lost} file${lost > 1 ? "s" : ""} missing</span>` : ""}</td>
       <td class="r num"><b>${money(r.deductible)}</b>${r.gross !== r.deductible ? `<div class="sub">recorded ${money(r.gross)}</div>` : ""}</td>
-      <td><div class="row-actions"><button class="btn sm" data-act="edit" type="button">Edit</button><button class="btn sm danger" data-act="del" type="button">Delete</button></div></td>
+      <td><div class="row-actions">${e.conflictOf ? `<button class="btn sm" data-act="keep" type="button" title="Keep this imported copy and delete your version">Keep this</button><button class="btn sm" data-act="discard" type="button" title="Delete this imported copy, keep your version">Keep mine</button>` : ""}<button class="btn sm" data-act="edit" type="button">Edit</button><button class="btn sm danger" data-act="del" type="button">Delete</button></div></td>
     </tr>`;
   }
   function renderTable(container, entries, emptyHtml) {
@@ -299,9 +299,21 @@
     container.querySelectorAll("[data-act]").forEach(b => b.addEventListener("click", () => {
       const id = b.closest("tr").dataset.id; const e = state.entries.find(x => x.id === id); if (!e) return;
       if (b.dataset.act === "edit") { showView(["mileage", "expense"].includes(e.kind) ? "volunteer" : "ledger"); fillForm(e); }
+      else if (b.dataset.act === "keep" || b.dataset.act === "discard") resolveConflict(e, b.dataset.act === "keep");
       else if (b.dataset.confirm) deleteEntry(e);
       else { b.dataset.confirm = "1"; b.textContent = "Confirm delete"; setTimeout(() => { delete b.dataset.confirm; b.textContent = "Delete"; }, 3500); }
     }));
+  }
+  // keepImported: true → the imported copy replaces the local version; false → the imported copy is discarded.
+  async function resolveConflict(copy, keepImported) {
+    const before = state.entries;
+    const other = state.entries.find(x => x.id === copy.conflictOf);
+    const loser = keepImported ? other : copy;
+    state.entries = state.entries.filter(x => x !== loser).map(x => { if (x === copy && keepImported) { const k = Object.assign({}, x); delete k.conflictOf; if (other) k.id = other.id; return k; } return x; });
+    if (!keepImported) { /* nothing else to change */ }
+    if (!persist()) { state.entries = before; return; }
+    if (loser) for (const id of loser.receiptIds || []) { if (!(keepImported ? copy : other || {}).receiptIds?.includes(id)) await window.Store.deleteReceipt(id).catch(() => {}); }
+    await refreshReceipts(); renderAll(); toast(keepImported ? "Imported version kept" : "Your version kept");
   }
   async function deleteEntry(e) {
     const before = state.entries;
@@ -316,11 +328,14 @@
     const s = summarize(vis);
     const attention = vis.filter(e => ev(e).status !== "ok").length;
     $("ledgerStats").innerHTML = `
-      <div class="stat hero"><div class="label">Deductible total · ${yearLabel()}</div><div class="value">${money(s.deductible)}</div><div class="sub">${vis.length} entr${vis.length === 1 ? "y" : "ies"} · recorded ${money(s.gross)}${s.blocked ? ` · ${money(s.blocked)} blocked pending records` : ""}</div></div>
+      <div class="stat hero"><div class="label">Deductible total · ${yearLabel()}</div><div class="value">${money(s.deductible)}</div><div class="sub">${vis.length} entr${vis.length === 1 ? "y" : "ies"} · recorded ${money(s.gross)}${s.needsDocs ? ` · ${money(s.needsDocs)} needs documentation` : ""}${s.notEligible ? ` · ${money(s.notEligible)} not eligible` : ""}</div></div>
       <div class="stat"><div class="label">Cash gifts</div><div class="value">${money(s.cash)}</div><div class="sub">Schedule A line 11</div></div>
       <div class="stat"><div class="label">Goods &amp; stock</div><div class="value">${money(s.noncash)}</div><div class="sub">${s.noncash > RULES.FORM_8283_THRESHOLD ? "Form 8283 required" : "Schedule A line 12"}</div></div>
       <div class="stat"><div class="label">Volunteer costs</div><div class="value">${money(s.volunteer)}</div><div class="sub">Mileage + expenses</div></div>
       <div class="stat ${attention ? "attention" : ""}"><div class="label">Need attention</div><div class="value">${attention}</div><div class="sub">${s.needsAck ? s.needsAck + " missing acknowledgment" : attention ? "See status column" : "All records complete"}</div></div>`;
+    const conflicts = state.entries.filter(e => e.conflictOf);
+    $("conflictBanner").hidden = !conflicts.length;
+    if (conflicts.length) $("conflictBanner").innerHTML = `<b>${conflicts.length} imported entr${conflicts.length === 1 ? "y differs" : "ies differ"} from your version.</b><span>Both copies were kept. In the ledger, rows marked “Import conflict” show the imported copy; open each and choose which to keep.</span>`;
     const order = ["cash", "noncash", "stock", "mileage", "expense"];
     const total = order.reduce((t, k) => t + s.byKind[k], 0);
     $("breakdown").innerHTML = total ? `<div class="eyebrow">Where the deduction comes from</div>
@@ -349,7 +364,7 @@
       <div class="stat hero"><div class="label">Volunteer deduction · ${yearLabel()}</div><div class="value">${money(s.byKind.mileage + s.byKind.expense)}</div><div class="sub">Goes on Schedule A with cash gifts</div></div>
       <div class="stat"><div class="label">Miles driven</div><div class="value num">${miles.toLocaleString()}</div><div class="sub">× 14¢ = ${money(miles * RULES.MILEAGE_RATE)}</div></div>
       <div class="stat"><div class="label">Out-of-pocket expenses</div><div class="value">${money(s.byKind.expense)}</div><div class="sub">${vis.filter(e => e.kind === "expense").length} items</div></div>
-      <div class="stat ${notDed ? "attention" : ""}"><div class="label">Logged but not deductible</div><div class="value">${notDed}</div><div class="sub">${notDed ? "Kept for your records" : "Everything counts"}</div></div>`;
+      <div class="stat ${notDed ? "attention" : ""}"><div class="label">Logged but not eligible</div><div class="value">${notDed}</div><div class="sub">${notDed ? "Kept for your records" : "Everything counts"}</div></div>`;
     renderTable($("volunteerTable"), vis, `<h3>No trips or expenses for ${yearLabel()}.</h3><p>Log a delivery route, a supply run, or a conference trip above.</p>`);
     $("countVolunteer").textContent = vis.length;
   }
@@ -419,7 +434,7 @@
     const vis = visibleEntries(); const s = summarize(vis);
     $("summaryTitle").textContent = `Tax summary · ${yearLabel()}`;
     $("summaryStats").innerHTML = `
-      <div class="stat hero"><div class="label">Total charitable deduction</div><div class="value">${money(s.deductible)}</div><div class="sub">Before AGI limits and the 0.5% floor${s.blocked ? ` · ${money(s.blocked)} more if records are found` : ""}</div></div>
+      <div class="stat hero"><div class="label">Total charitable deduction</div><div class="value">${money(s.deductible)}</div><div class="sub">Before AGI limits and the 0.5% floor${s.needsDocs ? ` · includes ${money(s.needsDocs)} still needing documentation` : ""}${s.notEligible ? ` · ${money(s.notEligible)} recorded but not eligible` : ""}</div></div>
       <div class="stat"><div class="label">Cash + volunteer costs</div><div class="value">${money(s.cash + s.volunteer)}</div><div class="sub">Schedule A, line 11</div></div>
       <div class="stat"><div class="label">Goods + stock</div><div class="value">${money(s.noncash)}</div><div class="sub">Schedule A, line 12</div></div>
       <div class="stat ${s.needsAck || s.missingReceipts ? "attention" : ""}"><div class="label">Open items</div><div class="value">${s.needsAck + s.missingReceipts}</div><div class="sub">${s.needsAck} acknowledgments · ${s.missingReceipts} receipts</div></div>`;
@@ -442,7 +457,7 @@
     const lines = [cols.join(",")];
     [...entries].sort((a, b) => (a.date || "").localeCompare(b.date || "")).forEach(e => {
       const r = ev(e); const st = e.stock || {};
-      const status = r.status === "stop" ? "Not deductible" : r.status === "warn" ? "Needs attention" : "OK";
+      const status = r.status === "stop" ? "Not eligible" : r.status === "docs" ? "Documentation needed" : "OK";
       const row = [e.date, yearOf(e), e.donor, e.org, KINDS[e.kind].label, describe(e), r.gross.toFixed(2), num(e.benefit).toFixed(2), r.deductible.toFixed(2), status, e.method || "", e.checkNo || "", e.miles || "", e.parkingTolls || "", e.kind === "stock" && !isBlank(st.costBasis) ? num(st.costBasis).toFixed(2) : "", e.kind === "stock" ? (st.longTerm ? "Yes" : "No") : "", e.ackReceived ? "Yes" : "No", e.kind === "cash" ? (e.bankRecord ? "Yes" : "No") : "", receiptsFor(e).length, e.howValued || "", e.acquired || "", e.kind === "expense" ? (EXP[e.expenseCategory] || EXP.other).label : "", e.notes];
       lines.push(row.map(csvCell).join(","));
     });
@@ -463,7 +478,7 @@
     const years = year === "all" ? [...new Set(vis.map(yearOf).filter(Boolean))].sort().reverse() : [year];
     const checks = years.flatMap(y => { const sy = year === "all" ? summarize(vis.filter(e => yearOf(e) === y)) : s; return [`Filing checklist ${y}:`, ...sy.checklist.map(c => `  [${c.state === "need" ? "!" : c.state === "done" ? "x" : "-"}] ${c.text}`), ""]; });
     return [`GIVING LEDGER — TAX SUMMARY ${year === "all" ? "(all years)" : year}`, "",
-      `Total charitable deduction: ${money(s.deductible)}`, ...order.map(k => `  ${KINDS[k].label}: ${money(s.byKind[k])}`), s.blocked ? `  Recorded but not deductible without records: ${money(s.blocked)}` : "", "",
+      `Total charitable deduction: ${money(s.deductible)}`, ...order.map(k => `  ${KINDS[k].label}: ${money(s.byKind[k])}`), s.needsDocs ? `  Of which still needing documentation: ${money(s.needsDocs)}` : "", s.notEligible ? `  Recorded but not eligible: ${money(s.notEligible)}` : "", "",
       "By donor:", ...Object.entries(s.byDonor).map(([k, v]) => `  ${k}: ${money(v)}`), "",
       "By organization:", ...Object.entries(s.byOrg).map(([k, v]) => `  ${k}: ${money(v)}`), "",
       ...checks,
@@ -510,11 +525,11 @@
       const f = ev.target.files[0]; if (!f) return;
       try {
         const json = JSON.parse(await f.text());
-        const snapshot = JSON.stringify(state);
-        const res = await window.Store.importBackup(json, state, mode);
-        if (!persist()) { state = JSON.parse(snapshot); toast("Restore failed: couldn't write to browser storage. Nothing changed.", true); return; }
+        const commit = newState => { const prev = state; state = newState; if (!persist()) { state = prev; return false; } return true; };
+        const res = await window.Store.importBackup(json, state, mode, commit);
         await refreshReceipts(); close(); renderYearPicker(); renderAll();
-        const parts = mode === "replace" ? [`${res.added} entries and ${res.receiptsAdded} receipts restored`] : [`${res.added} added`, `${res.updated} updated`, `${res.skipped} unchanged`, `${res.receiptsAdded} receipts added`];
+        const parts = mode === "replace" ? [`${res.added} entries and ${res.receiptsAdded} receipts restored`] : [`${res.added} added`, `${res.skipped} unchanged`, `${res.conflicts} conflict${res.conflicts === 1 ? "" : "s"} kept for review`, `${res.receiptsAdded} receipts added`];
+        if (res.staleRemoveFailed) parts.push(`${res.staleRemoveFailed} old receipt files could not be removed`);
         if (res.rejected) parts.push(`${res.rejected} malformed entries skipped`);
         if (res.receiptsFailed.length) parts.push(`${res.receiptsFailed.length} receipts unreadable`);
         toast(parts.join(", "), true);
@@ -541,11 +556,11 @@
       mk({ kind: "cash", date: `${y}-03-22`, donor: "Sample · Maria", org: "St. Brigid Parish", amount: 40, method: "check", checkNo: "1187", benefit: 0, bankRecord: true, ackReceived: false }),
       mk({ kind: "cash", date: `${y}-05-09`, donor: "Sample · Joint", org: "Riverside Arts Center", amount: 300, method: "online", benefit: 120, bankRecord: true, ackReceived: false, notes: "Spring gala — two dinner tickets valued at $60 each" }),
       mk({ kind: "cash", date: `${y}-06-15`, donor: "Sample · David", org: "Community Chest street collection", amount: 100, method: "cash", benefit: 0, bankRecord: false, ackReceived: false, notes: "Cash in a collection bucket, no receipt" }),
-      mk({ kind: "noncash", date: `${y}-04-18`, donor: "Sample · David", org: "Goodwill Industries", items: [{ desc: "Men's suits", category: "Men's clothing", condition: "good", qty: 2, unitValue: 35 }, { desc: "Women's coats", category: "Women's clothing", condition: "excellent", qty: 2, unitValue: 30 }, { desc: "Hardcover books", category: "Books, media & toys", condition: "good", qty: 20, unitValue: 2 }], benefit: 0, howValued: window.FMV_METHODS[0], ackReceived: true, notes: "Drop-off receipt attached" }),
+      mk({ kind: "noncash", date: `${y}-04-18`, donor: "Sample · David", org: "Goodwill Industries", items: [{ desc: "Men's suits", category: "Men's clothing", condition: "good", qty: 2, unitValue: 35 }, { desc: "Women's coats", category: "Women's clothing", condition: "excellent", qty: 2, unitValue: 30 }, { desc: "Hardcover books", category: "Books, media & toys", condition: "good", qty: 20, unitValue: 2 }], benefit: 0, howValued: window.FMV_METHODS[0], ackReceived: true, hasReceiptDecl: true, notes: "Drop-off receipt on file" }),
       mk({ kind: "stock", date: `${y}-06-03`, donor: "Sample · Joint", org: "Lakeshore Land Trust", amount: 4200, stock: { ticker: "20 sh VTI", costBasis: 1900, longTerm: true }, ackReceived: true }),
       mk({ kind: "mileage", date: `${y}-02-07`, donor: "Sample · Maria", org: "Meals on Wheels", miles: 38, parkingTolls: 0, purpose: "Saturday delivery route", route: "Home → kitchen → 12 stops → home", ackReceived: false }),
-      mk({ kind: "mileage", date: `${y}-02-14`, donor: "Sample · Maria", org: "Meals on Wheels", miles: 41, parkingTolls: 4, purpose: "Saturday delivery route", route: "Home → kitchen → 13 stops → home", ackReceived: false }),
-      mk({ kind: "expense", date: `${y}-07-19`, donor: "Sample · David", org: "Habitat for Humanity", amount: 486.4, expenseCategory: "transport", expenseDesc: "Flight to week-long build in Tulsa", awayOvernight: true, personalPleasure: false, reimbursed: false, ackReceived: true }),
+      mk({ kind: "mileage", date: `${y}-02-14`, donor: "Sample · Maria", org: "Meals on Wheels", miles: 41, parkingTolls: 4, purpose: "Saturday delivery route", route: "Home → kitchen → 13 stops → home", ackReceived: false, hasReceiptDecl: true }),
+      mk({ kind: "expense", date: `${y}-07-19`, donor: "Sample · David", org: "Habitat for Humanity", amount: 486.4, expenseCategory: "transport", expenseDesc: "Flight to week-long build in Tulsa", awayOvernight: true, personalPleasure: false, reimbursed: false, ackReceived: true, hasReceiptDecl: true }),
       mk({ kind: "expense", date: `${y}-07-20`, donor: "Sample · David", org: "Habitat for Humanity", amount: 58.2, expenseCategory: "meals", expenseDesc: "Meals during build week", awayOvernight: true, reimbursed: false, ackReceived: true }),
       mk({ kind: "expense", date: `${y}-08-30`, donor: "Sample · Maria", org: "Meals on Wheels", amount: 14.5, expenseCategory: "meals", expenseDesc: "Lunch after delivery shift", awayOvernight: false, reimbursed: false })
     ];

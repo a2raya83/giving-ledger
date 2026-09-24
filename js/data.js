@@ -5,6 +5,7 @@
   const DB_NAME = "giving-ledger";
   const STORE = "receipts";
   let dbPromise = null;
+  const test = { failWrites: 0, allowFirst: 0 }; // test hook: after allowFirst successful writes, the next failWrites receipt writes fail (failure tests)
 
   function openDb() {
     if (dbPromise) return dbPromise;
@@ -28,6 +29,7 @@
   }
 
   function tx(mode, fn) {
+    if (mode === "readwrite" && test.failWrites > 0) { if (test.allowFirst > 0) test.allowFirst--; else { test.failWrites--; return Promise.reject(new Error("Simulated storage failure")); } }
     return openDb().then(db => new Promise((resolve, reject) => {
       const t = db.transaction(STORE, mode);
       const store = t.objectStore(STORE);
@@ -51,8 +53,9 @@
   // Returns true on success. Callers must check — a failed save must not be reported as saved.
   function saveState(state) {
     try {
-      localStorage.setItem(LS_KEY, JSON.stringify(state));
-      return localStorage.getItem(LS_KEY) !== null;
+      const json = JSON.stringify(state);
+      localStorage.setItem(LS_KEY, json);
+      return localStorage.getItem(LS_KEY) === json;
     } catch (e) { return false; }
   }
 
@@ -70,9 +73,10 @@
     if (!e || typeof e !== "object" || !KIND_SET.has(e.kind)) return null;
     const out = {
       id: str(e.id, 64) || uid(), kind: e.kind, date: isoDate(e.date), donor: str(e.donor, 120), org: str(e.org, 200), notes: str(e.notes, 2000),
-      ackReceived: bool(e.ackReceived), receiptIds: Array.isArray(e.receiptIds) ? e.receiptIds.map(x => str(x, 64)).filter(Boolean) : [],
+      ackReceived: bool(e.ackReceived), hasReceiptDecl: bool(e.hasReceiptDecl), receiptIds: Array.isArray(e.receiptIds) ? e.receiptIds.map(x => str(x, 64)).filter(Boolean) : [],
       createdAt: str(e.createdAt, 40), updatedAt: str(e.updatedAt, 40), sample: bool(e.sample), benefit: nonNeg(e.benefit), amount: nonNeg(e.amount)
     };
+    if (e.conflictOf) out.conflictOf = str(e.conflictOf, 64);
     if (e.kind === "cash") Object.assign(out, { method: str(e.method, 20), checkNo: str(e.checkNo, 60), bankRecord: e.bankRecord !== false });
     if (e.kind === "noncash") Object.assign(out, {
       items: (Array.isArray(e.items) ? e.items : []).map(it => it && typeof it === "object" ? { desc: str(it.desc, 200), category: str(it.category, 60), condition: ["excellent", "good", "fair"].includes(it.condition) ? it.condition : "good", qty: Math.max(1, Math.round(Number(it.qty) || 1)), unitValue: nonNeg(it.unitValue), lo: numOrNull(it.lo), hi: numOrNull(it.hi) } : null).filter(Boolean),
@@ -82,6 +86,11 @@
     if (e.kind === "mileage") Object.assign(out, { miles: nonNeg(e.miles), parkingTolls: nonNeg(e.parkingTolls), route: str(e.route, 200), purpose: str(e.purpose, 300), rate: 0.14 });
     if (e.kind === "expense") Object.assign(out, { expenseCategory: str(e.expenseCategory, 20) || "other", expenseDesc: str(e.expenseDesc, 300), reimbursed: bool(e.reimbursed), awayOvernight: bool(e.awayOvernight), personalPleasure: bool(e.personalPleasure), companions: bool(e.companions), uniformNoGeneralUse: bool(e.uniformNoGeneralUse), delegate: bool(e.delegate) });
     return out;
+  }
+  // Content signature: everything that matters, ignoring timestamps and flags that don't describe the gift.
+  function signature(e) {
+    const c = Object.assign({}, e); delete c.createdAt; delete c.updatedAt; delete c.sample; delete c.conflictOf;
+    return JSON.stringify(c, Object.keys(c).sort());
   }
 
   /* ---------- receipts ---------- */
@@ -143,11 +152,33 @@
     return { app: "giving-ledger", version: 2, exportedAt: new Date().toISOString(), counts: { entries: state.entries.length, receipts: out.length, missingReceiptFiles: missing.length }, entries: state.entries, settings: state.settings || {}, receipts: out };
   }
 
-  // Validate and stage the whole import before touching existing data.
-  // mode "merge": newer updatedAt wins per entry id; receipts are added only if not already present.
-  // mode "replace": existing data is cleared only after every incoming receipt has decoded successfully.
-  // Returns { entries, receipts, added, updated, skipped, receiptsAdded, receiptsFailed }
-  async function importBackup(json, state, mode) {
+  // Merge incoming entries into existing ones without losing anything:
+  //   new id            → added
+  //   same id, same content → skipped
+  //   same id, different content → the incoming version is kept as a separate "conflict copy"
+  //                                 (conflictOf = existing id) for the user to resolve. Clocks are not trusted.
+  function mergeEntries(existing, incoming) {
+    const entries = existing.slice();
+    const byId = new Map(entries.map(e => [e.id, e]));
+    let added = 0, skipped = 0, conflicts = 0;
+    incoming.forEach(e => {
+      const cur = byId.get(e.id);
+      if (!cur) { entries.push(e); byId.set(e.id, e); added++; return; }
+      if (signature(cur) === signature(e)) { skipped++; return; }
+      const copy = Object.assign({}, e, { id: uid(), conflictOf: cur.id });
+      entries.push(copy); byId.set(copy.id, copy); conflicts++;
+    });
+    return { entries, added, skipped, conflicts };
+  }
+
+  // Restore from a backup. Nothing existing is discarded until the whole operation has succeeded:
+  //   1. validate + decode everything in memory
+  //   2. write incoming receipts (remembering what was new and what was overwritten)
+  //   3. build the new ledger and ask the app to persist it via `commit(newState)`
+  //   4. only if commit succeeded and mode is "replace": delete receipts that aren't in the backup
+  // If 2 or 3 fails, receipt writes are rolled back and the original ledger is untouched.
+  // Returns { added, updated, skipped, conflicts, rejected, receiptsAdded, receiptsFailed, staleRemoved, staleRemoveFailed }
+  async function importBackup(json, state, mode, commit) {
     if (!json || typeof json !== "object" || json.app !== "giving-ledger" || !Array.isArray(json.entries)) throw new Error("That isn't a Giving Ledger backup file.");
     const incoming = json.entries.map(sanitizeEntry).filter(Boolean);
     const rejected = json.entries.length - incoming.length;
@@ -159,26 +190,46 @@
     if (mode === "replace" && failed.length) throw new Error(`${failed.length} receipt file${failed.length > 1 ? "s" : ""} in the backup couldn't be decoded, so nothing was replaced. Try "Merge" instead.`);
     if (!incoming.length && !staged.length) throw new Error("The backup contains no usable entries or receipts." + (rejected ? ` (${rejected} malformed entries skipped.)` : ""));
 
-    let added = 0, updated = 0, skipped = 0, receiptsAdded = 0;
-    if (mode === "replace") {
-      await clearReceipts();
-      for (const r of staged) { await tx("readwrite", s => s.put(r)); receiptsAdded++; }
-      state.entries = incoming; added = incoming.length;
-    } else {
-      const existingIds = new Set();
-      try { (await listReceipts()).forEach(r => existingIds.add(r.id)); } catch (e) { throw new Error("Couldn't read existing receipts; nothing was imported."); }
-      for (const r of staged) { if (!existingIds.has(r.id)) { await tx("readwrite", s => s.put(r)); receiptsAdded++; } }
-      const byId = new Map(state.entries.map(e => [e.id, e]));
-      incoming.forEach(e => {
-        const cur = byId.get(e.id);
-        if (!cur) { state.entries.push(e); byId.set(e.id, e); added++; }
-        else if ((e.updatedAt || e.createdAt || "") > (cur.updatedAt || cur.createdAt || "")) { Object.assign(cur, e); updated++; }
-        else skipped++;
-      });
+    let existing;
+    try { existing = await listReceipts(); } catch (e) { throw new Error("Couldn't read existing receipts; nothing was imported."); }
+    const existingMap = new Map(existing.map(r => [r.id, r]));
+
+    // Step 2: write incoming receipts, tracking for rollback.
+    const writtenNew = [], overwritten = [];
+    let receiptsAdded = 0;
+    const rollback = async () => {
+      const problems = [];
+      for (const id of writtenNew) { try { await deleteReceipt(id); } catch (e) { problems.push(id); } }
+      for (const r of overwritten) { try { await tx("readwrite", s => s.put(r)); } catch (e) { problems.push(r.id); } }
+      return problems;
+    };
+    try {
+      for (const r of staged) {
+        const prior = existingMap.get(r.id);
+        if (prior && mode === "merge") continue;             // keep what's already here
+        await tx("readwrite", s => s.put(r));
+        if (prior) overwritten.push(prior); else writtenNew.push(r.id);
+        receiptsAdded++;
+      }
+      // Step 3: build and commit the new ledger.
+      let result;
+      if (mode === "replace") result = { entries: incoming, added: incoming.length, skipped: 0, conflicts: 0 };
+      else result = mergeEntries(state.entries, incoming);
+      const newState = { entries: result.entries, settings: Object.assign({}, state.settings, (json.settings && typeof json.settings === "object") ? json.settings : {}) };
+      if (!commit(newState)) throw new Error("Couldn't write the ledger to browser storage (blocked or full). Nothing was changed.");
+      // Step 4: replace mode only — remove receipts that are not part of the backup. Best effort; reported.
+      let staleRemoved = 0, staleRemoveFailed = 0;
+      if (mode === "replace") {
+        const keep = new Set(staged.map(r => r.id));
+        for (const r of existing) { if (!keep.has(r.id)) { try { await deleteReceipt(r.id); staleRemoved++; } catch (e) { staleRemoveFailed++; } } }
+      }
+      return { added: result.added, updated: 0, skipped: result.skipped, conflicts: result.conflicts, rejected, receiptsAdded, receiptsFailed: failed, staleRemoved, staleRemoveFailed };
+    } catch (e) {
+      const problems = await rollback();
+      const msg = (e && e.message) || "Restore failed";
+      throw new Error(problems.length ? `${msg} Rollback could not undo ${problems.length} receipt write${problems.length > 1 ? "s" : ""}; your ledger entries are unchanged.` : `${msg} Your existing ledger and receipts are unchanged.`);
     }
-    if (json.settings && typeof json.settings === "object") state.settings = Object.assign({}, state.settings, json.settings);
-    return { added, updated, skipped, rejected, receiptsAdded, receiptsFailed: failed };
   }
 
-  window.Store = { uid, loadState, saveState, sanitizeEntry, addReceipt, getReceipt, listReceipts, deleteReceipt, attachReceipts, clearReceipts, exportBackup, importBackup };
+  window.Store = { uid, loadState, saveState, sanitizeEntry, signature, mergeEntries, addReceipt, getReceipt, listReceipts, deleteReceipt, attachReceipts, clearReceipts, exportBackup, importBackup, _test: test };
 })();

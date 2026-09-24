@@ -123,6 +123,7 @@ main { max-width: 1120px; margin: 0 auto; padding-block: 22px 60px; padding-inli
 /* Stat tiles */
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
 .stat { min-width: 0; overflow-wrap: anywhere; }
+.stat { min-width: 0; overflow-wrap: anywhere; }
 .stat { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; }
 .stat .label { font-size: 0.8rem; color: var(--ink-2); }
 .stat .value { font-family: var(--font-display); font-weight: 600; font-size: 1.6rem; line-height: 1.1; margin-top: 4px; }
@@ -208,12 +209,12 @@ main { max-width: 1120px; margin: 0 auto; padding-block: 22px 60px; padding-inli
 .flag { display: flex; gap: 10px; align-items: flex-start; padding: 9px 12px; border-radius: 8px; font-size: 0.88rem; border-left: 3px solid; }
 .flag.info { background: var(--surface-2); border-color: var(--line-strong); color: var(--ink-2); }
 .flag.ok { background: var(--ok-soft); border-color: var(--ok); }
-.flag.warn { background: var(--warn-soft); border-color: var(--warn); }
+.flag.warn, .flag.docs, .flag.limit { background: var(--warn-soft); border-color: var(--warn); }
 .flag.stop { background: var(--danger-soft); border-color: var(--danger); }
 .flag b { font-weight: 600; }
 .insight { position: sticky; top: 96px; }
 .insight .verdict { font-family: var(--font-display); font-size: 1.15rem; font-weight: 600; margin-bottom: 6px; }
-.insight .verdict.ok { color: var(--ok); } .insight .verdict.warn { color: var(--warn); } .insight .verdict.stop { color: var(--danger); }
+.insight .verdict.ok { color: var(--ok); } .insight .verdict.warn, .insight .verdict.docs { color: var(--warn); } .insight .verdict.stop { color: var(--danger); }
 .two-col { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 18px; align-items: start; }
 
 /* Receipts */
@@ -246,7 +247,8 @@ td .sub { font-size: 0.8rem; color: var(--muted); }
 .pill.k-cash { border-color: var(--s1); } .pill.k-noncash { border-color: var(--s2); } .pill.k-stock { border-color: var(--s3); } .pill.k-mileage { border-color: var(--s4); } .pill.k-expense { border-color: var(--s5); }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 99px; margin-right: 5px; }
 .badge { display: inline-flex; align-items: center; gap: 4px; font-size: 0.74rem; padding: 2px 8px; border-radius: 99px; }
-.badge.warn { background: var(--warn-soft); color: var(--warn); }
+.badge.warn, .badge.docs { background: var(--warn-soft); color: var(--warn); }
+.badge.conflict { background: var(--danger-soft); color: var(--danger); }
 .badge.ok { background: var(--ok-soft); color: var(--ok); }
 .badge.stop { background: var(--danger-soft); color: var(--danger); }
 .row-actions { display: flex; gap: 4px; justify-content: flex-end; white-space: nowrap; }

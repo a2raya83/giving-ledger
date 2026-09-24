@@ -81,14 +81,19 @@ paper receipt in a folder is a receipt.
   single localStorage write, which is the switch-over. Only after that does "Replace" delete the
   previous receipts. If a step fails, the staged writes are rolled back. If the tab closes before the
   commit, the previous ledger still points at its own files and the staged orphans are removed on the
-  next load. This is not one atomic transaction across both stores; the commit point is the ledger
-  write, and everything before it is invisible to the old ledger.
+  next load. Each restore has a batch id that the committed ledger records, so a receipt whose batch
+  was committed is kept even if it links to no entry and the flag-clearing step was interrupted.
+  This is not one atomic transaction across both stores; the commit point is the ledger write, and
+  everything before it is invisible to the old ledger.
 - Merge never overwrites. New ids are added; identical entries (compared field by field at every
   nesting level, including items and stock details) are skipped; an entry with the same id but
   different content is kept as a separate "Import conflict" copy with Keep this / Keep mine
   buttons. Device clocks are not trusted to pick a winner. Until resolved, a conflict copy is not
   counted in any total, appraisal aggregation, checklist or export; the checklist lists it as an
-  open item and exports say how many were left out.
+  open item and exports say how many were left out. Editing a conflict copy keeps it a conflict copy;
+  only Keep this / Keep mine resolves it.
+- A receipt file is deleted only when no remaining entry references it. A conflict copy and its
+  original share files, so deleting or resolving either one never removes a file the other needs.
 - Rows whose receipt file is missing from this browser say so, rather than counting the id as a file.
 
 ## Tax rules encoded
@@ -122,10 +127,12 @@ node test/data.test.js
 
 For the failure-mode tests (storage failing midway through a restore, ledger write failing after
 receipts were written, save failing after a staged receipt removal, nested-change merge conflicts,
-conflicts excluded from totals and exports, a restore interrupted before commit, similar goods
-across categories and charities), run the site locally, open the browser console, and paste
+conflicts excluded from totals and exports, editing and deleting conflict copies, a restore
+interrupted before commit and one interrupted right after commit with an unlinked receipt, similar
+goods across categories and charities), run the site locally, open the browser console, and paste
 `test/browser-failure-tests.js`. It resets the browser's copy of the data first, so don't run it
-where real entries live.
+where real entries live. The script reloads the page once to test startup cleanup for real; paste
+it a second time after the reload to see the final results.
 
 ## Roadmap ideas
 

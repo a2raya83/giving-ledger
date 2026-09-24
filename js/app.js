@@ -33,6 +33,11 @@
   function urlFor(rec) { const u = URL.createObjectURL(rec.blob); objectUrls.push(u); return u; }
   async function refreshReceipts() { try { receiptsCache = await window.Store.listReceipts(); } catch (e) { receiptsCache = []; toast("Receipt storage is unavailable in this browser; files can't be shown.", true); } }
   const receiptsFor = e => (e.receiptIds || []).map(id => receiptsCache.find(r => r.id === id)).filter(Boolean);
+  // Delete a receipt file only if no entry still references it (a conflict copy and its original share files).
+  async function releaseReceipt(id) {
+    if (state.entries.some(e => (e.receiptIds || []).includes(id))) return false;
+    await window.Store.deleteReceipt(id).catch(() => {}); return true;
+  }
   const ev = e => evaluate(e, { files: receiptsFor(e).length });
   const summarize = entries => yearSummary(entries, { filesFor: e => receiptsFor(e).length });
   function inYear(e) { return year === "all" || yearOf(e) === year; }
@@ -167,6 +172,8 @@
       id: editingId || window.Store.uid(), kind: currentKind, date: $("f_date").value, donor: $("f_donor").value.trim(), org: $("f_org").value.trim(),
       notes: $("f_notes").value.trim(), ackReceived: $("f_ack").checked, hasReceiptDecl: $("f_hasReceipt").checked, receiptIds: pendingReceiptIds.slice()
     };
+    const prior = editingId ? state.entries.find(x => x.id === editingId) : null;
+    if (prior && prior.conflictOf) e.conflictOf = prior.conflictOf;   // only Keep this / Keep mine resolves a conflict
     if (currentKind === "cash") Object.assign(e, { amount: num($("f_amount_cash").value), method: $("f_method").value, checkNo: $("f_checkNo").value.trim(), benefit: num($("f_benefit").value), bankRecord: $("f_bankRecord").checked });
     if (currentKind === "noncash") Object.assign(e, { items: readItems(), amount: 0, benefit: num($("f_benefit").value), howValued: $("f_howValued").value, acquired: $("f_acquired").value.trim(), vehicle: $("f_vehicle").checked, appraised: $("f_appraised").checked });
     if (currentKind === "stock") Object.assign(e, { amount: num($("f_amount_stock").value), stock: { ticker: $("f_ticker").value.trim(), costBasis: $("f_costBasis").value === "" ? null : num($("f_costBasis").value), longTerm: $("f_longTerm").checked } });
@@ -184,7 +191,8 @@
     if (e.kind === "stock") { $("f_amount_stock").value = e.amount || ""; $("f_ticker").value = (e.stock || {}).ticker || ""; $("f_costBasis").value = isBlank((e.stock || {}).costBasis) ? "" : e.stock.costBasis; $("f_longTerm").checked = (e.stock || {}).longTerm !== false; }
     if (e.kind === "mileage") { $("f_miles").value = e.miles || ""; $("f_parkingTolls").value = e.parkingTolls || ""; $("f_route").value = e.route || ""; $("f_purpose").value = e.purpose || ""; }
     if (e.kind === "expense") { $("f_amount_expense").value = e.amount || ""; $("f_expenseCategory").value = e.expenseCategory || "other"; $("f_expenseDesc").value = e.expenseDesc || ""; $("f_reimbursed").checked = !!e.reimbursed; $("f_awayOvernight").checked = !!e.awayOvernight; $("f_personalPleasure").checked = !!e.personalPleasure; $("f_companions").checked = !!e.companions; $("f_uniformNoGeneralUse").checked = !!e.uniformNoGeneralUse; $("f_delegate").checked = !!e.delegate; updateExpenseVisibility(); }
-    $("formTitle").textContent = "Edit entry"; $("volFormTitle").textContent = "Edit entry"; $("cancelEdit").hidden = false; $("saveBtn").textContent = "Save changes";
+    $("formTitle").textContent = e.conflictOf ? "Edit imported copy (import conflict)" : "Edit entry"; $("volFormTitle").textContent = e.conflictOf ? "Edit imported copy (import conflict)" : "Edit entry"; $("cancelEdit").hidden = false; $("saveBtn").textContent = "Save changes";
+    if (e.conflictOf) $("saveHint").textContent = "This is the imported copy of a conflict. It stays uncounted until you choose Keep this or Keep mine in the ledger.";
     renderThumbs(); updateInsight();
     form.scrollIntoView({ behavior: "smooth", block: "start" });
   }
@@ -193,7 +201,7 @@
   async function resetForm(keepDate = true) {
     const d = $("f_date").value;
     const orphans = pendingReceiptIds.filter(id => !originalReceiptIds.includes(id));
-    for (const id of orphans) await window.Store.deleteReceipt(id).catch(() => {});
+    for (const id of orphans) await releaseReceipt(id);
     if (orphans.length) await refreshReceipts();
     form.reset(); editingId = null; pendingReceiptIds = []; originalReceiptIds = []; stagedRemovals = [];
     $("f_date").value = keepDate && d ? d : new Date().toISOString().slice(0, 10);
@@ -242,7 +250,7 @@
     $("thumbs").querySelectorAll(".rm").forEach(b => b.addEventListener("click", async () => {
       const id = b.parentElement.dataset.id; pendingReceiptIds = pendingReceiptIds.filter(x => x !== id);
       if (originalReceiptIds.includes(id)) { stagedRemovals.push(id); $("saveHint").textContent = "Receipt will be removed when you save. Cancel to keep it."; }
-      else { await window.Store.deleteReceipt(id).catch(() => {}); await refreshReceipts(); }
+      else { await releaseReceipt(id); await refreshReceipts(); }
       renderThumbs(); updateInsight();
     }));
   }
@@ -272,7 +280,7 @@
     if (!persist()) { if (previous) state.entries[idx] = previous; else state.entries.pop(); $("saveHint").textContent = "Not saved. Your entry is still in the form — export a backup or free up storage, then try again."; return; }
     // Saved. Now finalize receipts: attach current ones, delete staged removals.
     await window.Store.attachReceipts(e.receiptIds, e.id).catch(() => toast("Saved, but receipt links couldn't be updated.", true));
-    for (const id of stagedRemovals) await window.Store.deleteReceipt(id).catch(() => {});
+    for (const id of stagedRemovals) await releaseReceipt(id);
     originalReceiptIds = pendingReceiptIds.slice(); stagedRemovals = [];
     await refreshReceipts();
     if (yearOf(e) !== year && year !== "all") year = yearOf(e);
@@ -315,14 +323,14 @@
     state.entries = state.entries.filter(x => x !== loser).map(x => { if (x === copy && keepImported) { const k = Object.assign({}, x); delete k.conflictOf; if (other) k.id = other.id; return k; } return x; });
     if (!keepImported) { /* nothing else to change */ }
     if (!persist()) { state.entries = before; return; }
-    if (loser) for (const id of loser.receiptIds || []) { if (!(keepImported ? copy : other || {}).receiptIds?.includes(id)) await window.Store.deleteReceipt(id).catch(() => {}); }
+    if (loser) for (const id of loser.receiptIds || []) await releaseReceipt(id);
     await refreshReceipts(); renderAll(); toast(keepImported ? "Imported version kept" : "Your version kept");
   }
   async function deleteEntry(e) {
     const before = state.entries;
     state.entries = state.entries.filter(x => x.id !== e.id);
     if (!persist()) { state.entries = before; return; }
-    for (const id of e.receiptIds || []) await window.Store.deleteReceipt(id).catch(() => {});
+    for (const id of e.receiptIds || []) await releaseReceipt(id);
     await refreshReceipts(); if (editingId === e.id) await resetForm(); renderAll(); toast("Entry deleted");
   }
 

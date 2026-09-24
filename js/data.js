@@ -5,7 +5,7 @@
   const DB_NAME = "giving-ledger";
   const STORE = "receipts";
   let dbPromise = null;
-  const test = { failWrites: 0, allowFirst: 0, crashBeforeCommit: false }; // test hook: after allowFirst successful writes, the next failWrites receipt writes fail (failure tests)
+  const test = { failWrites: 0, allowFirst: 0, crashBeforeCommit: false, crashAfterCommit: false }; // test hook: after allowFirst successful writes, the next failWrites receipt writes fail (failure tests)
 
   function openDb() {
     if (dbPromise) return dbPromise;
@@ -208,7 +208,9 @@
     // tab closes before the ledger commits, the orphans are removed on the next load (cleanupOrphans).
     const idMap = new Map();
     const writtenNew = [];
+    const batch = uid();            // every staged receipt carries this; the committed ledger records it
     let receiptsAdded = 0;
+    let committed = false;
     const rollback = async () => {
       const problems = [];
       for (const id of writtenNew) { try { await deleteReceipt(id); } catch (e) { problems.push(id); } }
@@ -217,7 +219,7 @@
     try {
       for (const r of staged) {
         if (mode === "merge" && existingIds.has(r.id)) continue;           // keep what's already here
-        const rec = Object.assign({}, r, { staged: true });
+        const rec = Object.assign({}, r, { staged: true, batch });
         if (existingIds.has(r.id)) { rec.id = uid(); idMap.set(r.id, rec.id); }
         await tx("readwrite", s => s.put(rec));
         writtenNew.push(rec.id); receiptsAdded++;
@@ -228,29 +230,44 @@
       let result;
       if (mode === "replace") result = { entries: incoming, added: incoming.length, skipped: 0, conflicts: 0 };
       else result = mergeEntries(state.entries, incoming);
-      const newState = { entries: result.entries, settings: Object.assign({}, state.settings, (json.settings && typeof json.settings === "object") ? json.settings : {}) };
+      const settings = Object.assign({}, state.settings, (json.settings && typeof json.settings === "object") ? json.settings : {});
+      settings.restoreBatches = ((state.settings && state.settings.restoreBatches) || []).concat(batch).slice(-50);
+      const newState = { entries: result.entries, settings };
       if (!commit(newState)) throw new Error("Couldn't write the ledger to browser storage (blocked or full). Nothing was changed.");
+      committed = true;
+      if (test.crashAfterCommit) { test.crashAfterCommit = false; const err = new Error("Simulated crash after commit"); err.simulatedCrash = true; throw err; }
       // Step 4 (after commit): replace mode removes the previous receipts; both modes clear the staged mark. Best effort; reported.
       let staleRemoved = 0, staleRemoveFailed = 0;
       if (mode === "replace") {
         const keep = new Set(writtenNew);
         for (const r of existing) { if (!keep.has(r.id)) { try { await deleteReceipt(r.id); staleRemoved++; } catch (e) { staleRemoveFailed++; } } }
       }
-      for (const id of writtenNew) { try { const r = await getReceipt(id); if (r && r.staged) { delete r.staged; await tx("readwrite", s => s.put(r)); } } catch (e) { /* cleaned on next load if still referenced */ } }
+      for (const id of writtenNew) { try { const r = await getReceipt(id); if (r && r.staged) { delete r.staged; delete r.batch; await tx("readwrite", s => s.put(r)); } } catch (e) { /* finished on next load: the batch is recorded as committed */ } }
       return { added: result.added, updated: 0, skipped: result.skipped, conflicts: result.conflicts, rejected, receiptsAdded, receiptsFailed: failed, staleRemoved, staleRemoveFailed };
     } catch (e) {
       if (e && e.simulatedCrash) throw e;                                  // test hook: behave like a closed tab (no rollback)
+      if (committed) throw new Error("Restore committed, but post-commit cleanup hit an error: " + ((e && e.message) || e) + ". Your data is intact; leftover files are tidied on the next load.");
       const problems = await rollback();
       const msg = (e && e.message) || "Restore failed";
       throw new Error(problems.length ? `${msg} Rollback could not undo ${problems.length} receipt write${problems.length > 1 ? "s" : ""}; your ledger entries are unchanged.` : `${msg} Your existing ledger and receipts are unchanged.`);
     }
   }
 
-  // Remove receipt files left behind by an interrupted restore: marked "staged" and referenced by no entry.
+  // Tidy up after an interrupted restore.
+  //   staged + batch NOT committed → the restore never switched over: delete the file (unless an entry references it).
+  //   staged + batch committed     → the restore succeeded but the flag-clearing was interrupted: keep the file, clear the flag.
+  // A restored receipt that no entry links to is therefore safe as long as its batch was committed.
   async function cleanupOrphans(state) {
     const referenced = new Set(state.entries.flatMap(e => e.receiptIds || []));
+    const committed = new Set((state.settings && state.settings.restoreBatches) || []);
     let removed = 0;
-    try { for (const r of await listReceipts()) { if (r.staged && !referenced.has(r.id)) { await deleteReceipt(r.id); removed++; } } } catch (e) { /* storage unavailable */ }
+    try {
+      for (const r of await listReceipts()) {
+        if (!r.staged) continue;
+        if (committed.has(r.batch) || referenced.has(r.id)) { delete r.staged; delete r.batch; await tx("readwrite", s => s.put(r)).catch(() => {}); }
+        else { await deleteReceipt(r.id); removed++; }
+      }
+    } catch (e) { /* storage unavailable */ }
     return removed;
   }
 

@@ -16,10 +16,11 @@ records on a site you don't run a backend for. Backup & restore moves data betwe
 | `css/app.css` | Styles, light and dark palettes |
 | `js/rules.js` | IRS rules engine: thresholds, per-entry evaluation, appraisal grouping, year summary and filing checklist |
 | `js/fmv.js` | Fair-market-value ranges for ~130 commonly donated items, plus the appraisal-group map |
-| `js/data.js` | Storage layer: localStorage entries, IndexedDB receipts, transactional backup import/export |
+| `js/data.js` | Storage layer: localStorage entries, IndexedDB receipts, staged backup import/export |
 | `js/config.js` | Site settings: the optional "support this site" tip links |
 | `js/app.js` | UI logic |
 | `test/rules.test.js` | Rules-engine tests (`node test/rules.test.js`) |
+| `test/data.test.js` | Storage-layer tests: nested-change signatures, merge conflicts, conflict exclusion (`node test/data.test.js`) |
 | `test/browser-failure-tests.js` | Failure-mode tests to paste into the browser console on a running copy |
 | `serve.js` | Local preview server (`node serve.js`, then open http://localhost:8765) |
 | `original-donation-tracker.html` | The single-file tracker this replaced, kept for reference |
@@ -74,13 +75,20 @@ paper receipt in a folder is a receipt.
   the entry and the stored ledger is untouched.
 - Removing a receipt while editing is staged: Cancel keeps the original attachments, Save applies it.
 - Backups fail loudly if receipt files can't be read, and report entry/receipt counts.
-- Restore is transactional. The file is validated and decoded in memory first, incoming receipts are
-  written while remembering what was new or overwritten, then the ledger is committed. If any step
-  fails, the receipt writes are rolled back and the original ledger is untouched. Only after a
-  successful commit does "Replace" delete receipts that aren't in the backup.
-- Merge never overwrites. New ids are added; identical entries are skipped; an entry with the same
-  id but different content is kept as a separate "Import conflict" copy with Keep this / Keep mine
-  buttons. Device clocks are not trusted to pick a winner.
+- Restore is staged, then switched over in one write. The file is validated and decoded in memory
+  first. Incoming receipts are written under fresh ids, marked "staged", and never overwrite an
+  existing file; incoming entries are re-pointed to the new ids. The ledger is then committed in a
+  single localStorage write, which is the switch-over. Only after that does "Replace" delete the
+  previous receipts. If a step fails, the staged writes are rolled back. If the tab closes before the
+  commit, the previous ledger still points at its own files and the staged orphans are removed on the
+  next load. This is not one atomic transaction across both stores; the commit point is the ledger
+  write, and everything before it is invisible to the old ledger.
+- Merge never overwrites. New ids are added; identical entries (compared field by field at every
+  nesting level, including items and stock details) are skipped; an entry with the same id but
+  different content is kept as a separate "Import conflict" copy with Keep this / Keep mine
+  buttons. Device clocks are not trusted to pick a winner. Until resolved, a conflict copy is not
+  counted in any total, appraisal aggregation, checklist or export; the checklist lists it as an
+  open item and exports say how many were left out.
 - Rows whose receipt file is missing from this browser say so, rather than counting the id as a file.
 
 ## Tax rules encoded
@@ -109,10 +117,12 @@ Goodwill guide once a year.
 
 ```bash
 node test/rules.test.js
+node test/data.test.js
 ```
 
 For the failure-mode tests (storage failing midway through a restore, ledger write failing after
-receipts were written, save failing after a staged receipt removal, merge conflicts, similar goods
+receipts were written, save failing after a staged receipt removal, nested-change merge conflicts,
+conflicts excluded from totals and exports, a restore interrupted before commit, similar goods
 across categories and charities), run the site locally, open the browser console, and paste
 `test/browser-failure-tests.js`. It resets the browser's copy of the data first, so don't run it
 where real entries live.

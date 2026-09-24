@@ -182,10 +182,13 @@
     return { gross, eligible: Math.max(0, eligible), deductible, status, flags };
   }
 
+  // An imported conflict copy is kept for the user to resolve; until then it is not a gift of its own.
+  const isCountable = e => !e.conflictOf;
+
   // Similar-property aggregation across every non-cash entry in the set (should be one tax year).
   function similarPropertyGroups(entries) {
     const groups = {};
-    entries.filter(e => e.kind === "noncash").forEach(e => (e.items || []).forEach(it => {
+    entries.filter(e => e.kind === "noncash" && isCountable(e)).forEach(e => (e.items || []).forEach(it => {
       const key = appraisalGroup(it);
       groups[key] = (groups[key] || 0) + itemValue(it);
     }));
@@ -199,7 +202,8 @@
     const byKind = {}; Object.keys(KINDS).forEach(k => byKind[k] = 0);
     let gross = 0, deductible = 0, notEligible = 0, needsDocs = 0, needsAck = 0, missingFiles = 0, noncashTotal = 0, vehicle = 0;
     const byDonor = {}, byOrg = {};
-    entries.forEach(e => {
+    const conflicts = entries.filter(e => !isCountable(e)).length;
+    entries.filter(isCountable).forEach(e => {
       const r = evaluate(e, { files: filesFor(e) });
       byKind[e.kind] = (byKind[e.kind] || 0) + r.deductible;
       gross += r.gross; deductible += r.deductible;
@@ -223,14 +227,15 @@
       { key: "8283", state: noncashTotal > RULES.FORM_8283_THRESHOLD ? "need" : "na", text: noncashTotal > RULES.FORM_8283_THRESHOLD ? `Form 8283 — non-cash gifts total ${money(noncashTotal)} (over $500). Section A for items ≤ $5,000 and publicly traded stock.` : "Form 8283 not required (non-cash total ≤ $500)." },
       { key: "appraisal", state: appraisalGroups.length ? "need" : "na", text: appraisalGroups.length ? `Qualified appraisal + Form 8283 Section B needed: similar items total over $5,000 for the year — ${appraisalGroups.map(([k, v]) => `${k} ${money(v)}`).join(", ")}. The test adds up similar property across all charities.` : "No single item or group of similar items over $5,000 — no appraisal needed." },
       ...(uncategorized > 0 ? [{ key: "uncat", state: "need", text: `${money(uncategorized)} of goods have no category, so they can't be checked against the $5,000 similar-items test. Give each item a category.` }] : []),
+      ...(conflicts > 0 ? [{ key: "conflicts", state: "need", text: `${conflicts} import conflict${conflicts > 1 ? "s" : ""} unresolved. The imported copies are not counted anywhere until you choose which version to keep.` }] : []),
       { key: "1098c", state: vehicle ? "need" : "na", text: vehicle ? "Form 1098-C from the charity for each donated vehicle, boat or plane — attach to the return." : "No vehicle donations." },
       { key: "files", state: missingFiles ? "need" : "done", text: missingFiles ? `${missingFiles} entr${missingFiles > 1 ? "ies" : "y"} without a receipt photo or PDF attached (paper copies are fine, but attachments travel with the backup).` : "Every entry has a receipt, bank record or acknowledgment attached." }
     ];
-    return { byKind, byDonor, byOrg, gross, deductible, notEligible, needsDocs, blocked: notEligible, cash, noncash: noncashTotal, volunteer, needsAck, missingReceipts: missingFiles, appraisalGroups, groups, checklist };
+    return { byKind, byDonor, byOrg, gross, deductible, notEligible, needsDocs, blocked: notEligible, cash, noncash: noncashTotal, volunteer, needsAck, missingReceipts: missingFiles, appraisalGroups, groups, conflicts, checklist };
   }
 
   window.RULES = RULES;
   window.KINDS = KINDS;
   window.EXPENSE_CATEGORIES = EXPENSE_CATEGORIES;
-  window.Rules = { evaluate, grossValue, itemsTotal, itemValue, appraisalGroup, similarPropertyGroups, yearSummary, money, num, isBlank };
+  window.Rules = { evaluate, grossValue, itemsTotal, itemValue, appraisalGroup, similarPropertyGroups, yearSummary, isCountable, money, num, isBlank };
 })();

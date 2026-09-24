@@ -1,7 +1,7 @@
 // Giving Ledger — application
 (function () {
   const $ = id => document.getElementById(id);
-  const { evaluate, yearSummary, money, num, isBlank } = window.Rules;
+  const { evaluate, yearSummary, isCountable, money, num, isBlank } = window.Rules;
   const KINDS = window.KINDS, EXP = window.EXPENSE_CATEGORIES, RULES = window.RULES;
   const CFG = window.SITE_CONFIG || {};
   const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -37,6 +37,9 @@
   const summarize = entries => yearSummary(entries, { filesFor: e => receiptsFor(e).length });
   function inYear(e) { return year === "all" || yearOf(e) === year; }
   const visibleEntries = () => state.entries.filter(inYear);
+  // Entries that count: everything visible except unresolved import conflict copies.
+  const countableEntries = () => visibleEntries().filter(isCountable);
+  const conflictNote = () => { const n = visibleEntries().filter(e => !isCountable(e)).length; return n ? ` ${n} unresolved import conflict${n > 1 ? "s" : ""} left out.` : ""; };
   function copyText(text) {
     return navigator.clipboard.writeText(text).then(() => true).catch(() => {
       const ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select();
@@ -287,7 +290,7 @@
       <td><div class="org">${esc(e.org || (e.kind === "mileage" || e.kind === "expense" ? "(volunteering)" : "—"))}</div><div class="sub">${esc(describe(e))}${e.notes && e.kind !== "noncash" ? " · " + esc(e.notes) : ""}</div></td>
       <td>${esc(e.donor || "—")}</td>
       <td><span class="pill k-${e.kind}">${KINDS[e.kind].short}</span></td>
-      <td>${e.conflictOf ? `<span class="badge conflict">Import conflict</span> ` : ""}${statusBadge(r)}${recs.length ? ` <span class="small muted">📎${recs.length}</span>` : ""}${lost > 0 ? ` <span class="badge warn" title="Receipt file not found in this browser">${lost} file${lost > 1 ? "s" : ""} missing</span>` : ""}</td>
+      <td>${e.conflictOf ? `<span class="badge conflict">Import conflict</span> <span class="small muted">not counted</span> ` : ""}${statusBadge(r)}${recs.length ? ` <span class="small muted">📎${recs.length}</span>` : ""}${lost > 0 ? ` <span class="badge warn" title="Receipt file not found in this browser">${lost} file${lost > 1 ? "s" : ""} missing</span>` : ""}</td>
       <td class="r num"><b>${money(r.deductible)}</b>${r.gross !== r.deductible ? `<div class="sub">recorded ${money(r.gross)}</div>` : ""}</td>
       <td><div class="row-actions">${e.conflictOf ? `<button class="btn sm" data-act="keep" type="button" title="Keep this imported copy and delete your version">Keep this</button><button class="btn sm" data-act="discard" type="button" title="Delete this imported copy, keep your version">Keep mine</button>` : ""}<button class="btn sm" data-act="edit" type="button">Edit</button><button class="btn sm danger" data-act="del" type="button">Delete</button></div></td>
     </tr>`;
@@ -326,16 +329,17 @@
   function renderLedger() {
     const vis = visibleEntries();
     const s = summarize(vis);
-    const attention = vis.filter(e => ev(e).status !== "ok").length;
+    const cnt = vis.filter(isCountable);
+    const attention = cnt.filter(e => ev(e).status !== "ok").length;
     $("ledgerStats").innerHTML = `
-      <div class="stat hero"><div class="label">Deductible total · ${yearLabel()}</div><div class="value">${money(s.deductible)}</div><div class="sub">${vis.length} entr${vis.length === 1 ? "y" : "ies"} · recorded ${money(s.gross)}${s.needsDocs ? ` · ${money(s.needsDocs)} needs documentation` : ""}${s.notEligible ? ` · ${money(s.notEligible)} not eligible` : ""}</div></div>
+      <div class="stat hero"><div class="label">Deductible total · ${yearLabel()}</div><div class="value">${money(s.deductible)}</div><div class="sub">${cnt.length} entr${cnt.length === 1 ? "y" : "ies"}${s.conflicts ? ` · ${s.conflicts} conflict${s.conflicts > 1 ? "s" : ""} not counted` : ""} · recorded ${money(s.gross)}${s.needsDocs ? ` · ${money(s.needsDocs)} needs documentation` : ""}${s.notEligible ? ` · ${money(s.notEligible)} not eligible` : ""}</div></div>
       <div class="stat"><div class="label">Cash gifts</div><div class="value">${money(s.cash)}</div><div class="sub">Schedule A line 11</div></div>
       <div class="stat"><div class="label">Goods &amp; stock</div><div class="value">${money(s.noncash)}</div><div class="sub">${s.noncash > RULES.FORM_8283_THRESHOLD ? "Form 8283 required" : "Schedule A line 12"}</div></div>
       <div class="stat"><div class="label">Volunteer costs</div><div class="value">${money(s.volunteer)}</div><div class="sub">Mileage + expenses</div></div>
       <div class="stat ${attention ? "attention" : ""}"><div class="label">Need attention</div><div class="value">${attention}</div><div class="sub">${s.needsAck ? s.needsAck + " missing acknowledgment" : attention ? "See status column" : "All records complete"}</div></div>`;
     const conflicts = state.entries.filter(e => e.conflictOf);
     $("conflictBanner").hidden = !conflicts.length;
-    if (conflicts.length) $("conflictBanner").innerHTML = `<b>${conflicts.length} imported entr${conflicts.length === 1 ? "y differs" : "ies differ"} from your version.</b><span>Both copies were kept. In the ledger, rows marked “Import conflict” show the imported copy; open each and choose which to keep.</span>`;
+    if (conflicts.length) $("conflictBanner").innerHTML = `<b>${conflicts.length} imported entr${conflicts.length === 1 ? "y differs" : "ies differ"} from your version.</b><span>Both copies were kept. The imported copy (marked “Import conflict”) is not counted in totals, forms or exports until you choose Keep this or Keep mine.</span>`;
     const order = ["cash", "noncash", "stock", "mileage", "expense"];
     const total = order.reduce((t, k) => t + s.byKind[k], 0);
     $("breakdown").innerHTML = total ? `<div class="eyebrow">Where the deduction comes from</div>
@@ -357,9 +361,9 @@
 
   function renderVolunteer() {
     const vis = visibleEntries().filter(e => e.kind === "mileage" || e.kind === "expense");
-    const miles = vis.reduce((t, e) => t + (e.kind === "mileage" ? num(e.miles) : 0), 0);
+    const miles = vis.filter(isCountable).reduce((t, e) => t + (e.kind === "mileage" ? num(e.miles) : 0), 0);
     const s = summarize(vis);
-    const notDed = vis.filter(e => ev(e).status === "stop").length;
+    const notDed = vis.filter(e => isCountable(e) && ev(e).status === "stop").length;
     $("volunteerStats").innerHTML = `
       <div class="stat hero"><div class="label">Volunteer deduction · ${yearLabel()}</div><div class="value">${money(s.byKind.mileage + s.byKind.expense)}</div><div class="sub">Goes on Schedule A with cash gifts</div></div>
       <div class="stat"><div class="label">Miles driven</div><div class="value num">${miles.toLocaleString()}</div><div class="sub">× 14¢ = ${money(miles * RULES.MILEAGE_RATE)}</div></div>
@@ -392,7 +396,7 @@
   /* ---------- receipts view ---------- */
   function renderReceipts() {
     const vis = visibleEntries();
-    const missing = vis.filter(e => !receiptsFor(e).length && ev(e).deductible > 0 && e.kind !== "mileage" && !(e.kind === "cash" && e.bankRecord && ev(e).gross < RULES.ACK_THRESHOLD));
+    const missing = vis.filter(e => isCountable(e) && !receiptsFor(e).length && ev(e).deductible > 0 && e.kind !== "mileage" && !(e.kind === "cash" && e.bankRecord && ev(e).gross < RULES.ACK_THRESHOLD));
     $("missingReceipts").innerHTML = missing.length ? `<div class="card-head"><div><h3>${missing.length} entr${missing.length === 1 ? "y" : "ies"} without a receipt</h3><p>Attach a photo of the receipt or the charity's letter so the record is complete.</p></div></div>
       <div class="flags">${missing.map(e => `<div class="flag warn"><span><b>${fmtDate(e.date)}</b> · ${esc(e.org || describe(e))} · ${money(ev(e).deductible)}</span><button class="btn sm" type="button" data-edit="${esc(e.id)}" style="margin-left:auto">Attach</button></div>`).join("")}</div>`
       : `<div class="flag ok"><span>Every deductible entry for ${yearLabel()} has a receipt, bank record or acknowledgment.</span></div>`;
@@ -473,7 +477,7 @@
     return lines.join("\n");
   }
   function summaryText() {
-    const vis = visibleEntries(); const s = summarize(vis);
+    const vis = countableEntries(); const s = summarize(visibleEntries());
     const order = ["cash", "noncash", "stock", "mileage", "expense"];
     const years = year === "all" ? [...new Set(vis.map(yearOf).filter(Boolean))].sort().reverse() : [year];
     const checks = years.flatMap(y => { const sy = year === "all" ? summarize(vis.filter(e => yearOf(e) === y)) : s; return [`Filing checklist ${y}:`, ...sy.checklist.map(c => `  [${c.state === "need" ? "!" : c.state === "done" ? "x" : "-"}] ${c.text}`), ""]; });
@@ -482,13 +486,14 @@
       "By donor:", ...Object.entries(s.byDonor).map(([k, v]) => `  ${k}: ${money(v)}`), "",
       "By organization:", ...Object.entries(s.byOrg).map(([k, v]) => `  ${k}: ${money(v)}`), "",
       ...checks,
-      "Entries:", ...[...vis].sort((a, b) => (a.date || "").localeCompare(b.date || "")).map(e => `  ${e.date}  ${money(ev(e).deductible).padStart(12)}  ${KINDS[e.kind].short.padEnd(8)} ${e.org || ""} — ${describe(e)}`)
+      "Entries:", ...[...vis].sort((a, b) => (a.date || "").localeCompare(b.date || "")).map(e => `  ${e.date}  ${money(ev(e).deductible).padStart(12)}  ${KINDS[e.kind].short.padEnd(8)} ${e.org || ""} — ${describe(e)}`),
+      conflictNote() ? "" : "", conflictNote() ? "NOTE:" + conflictNote() + " Resolve them in the ledger before filing." : ""
     ].join("\n");
   }
-  const exportCsv = () => { const vis = visibleEntries(); if (!vis.length) return toast("Nothing to export for this year"); download(`giving-ledger-${year}.csv`, csvFor(vis), "text/csv"); toast("CSV download started (if nothing happened, use Copy CSV)"); };
+  const exportCsv = () => { const vis = countableEntries(); if (!vis.length) return toast("Nothing to export for this year"); download(`giving-ledger-${year}.csv`, csvFor(vis), "text/csv"); toast("CSV download started (if nothing happened, use Copy CSV)." + conflictNote(), !!conflictNote()); };
   $("csvBtn").addEventListener("click", exportCsv); $("summaryCsv").addEventListener("click", exportCsv);
-  $("itemsCsv").addEventListener("click", async () => { const vis = visibleEntries().filter(e => e.kind === "noncash"); if (!vis.length) return toast("No goods donations for this year"); download(`giving-ledger-items-${year}.csv`, itemsCsvFor(vis), "text/csv"); toast("Itemized goods CSV download started"); });
-  $("copyCsvBtn").addEventListener("click", async () => { const vis = visibleEntries(); if (!vis.length) return toast("Nothing to copy"); toast((await copyText(csvFor(vis))) ? "CSV copied — paste into a spreadsheet" : "Copy blocked by the browser"); });
+  $("itemsCsv").addEventListener("click", async () => { const vis = countableEntries().filter(e => e.kind === "noncash"); if (!vis.length) return toast("No goods donations for this year"); download(`giving-ledger-items-${year}.csv`, itemsCsvFor(vis), "text/csv"); toast("Itemized goods CSV download started"); });
+  $("copyCsvBtn").addEventListener("click", async () => { const vis = countableEntries(); if (!vis.length) return toast("Nothing to copy"); toast((await copyText(csvFor(vis))) ? "CSV copied — paste into a spreadsheet." + conflictNote() : "Copy blocked by the browser", !!conflictNote()); });
   $("summaryCopy").addEventListener("click", async () => toast((await copyText(summaryText())) ? "Summary copied" : "Copy blocked by the browser"));
   $("summaryPrint").addEventListener("click", () => { try { window.print(); } catch (e) {} toast("If no print dialog opened, use Copy summary instead"); });
 
@@ -580,7 +585,9 @@
 
   /* ---------- boot ---------- */
   (async function init() {
+    const orphans = await window.Store.cleanupOrphans(state).catch(() => 0);
     await refreshReceipts();
+    if (orphans) toast(`Removed ${orphans} receipt file${orphans > 1 ? "s" : ""} left over from an interrupted restore.`, true);
     renderYearPicker();
     $("f_date").value = new Date().toISOString().slice(0, 10);
     setKind("cash"); updateExpenseVisibility();

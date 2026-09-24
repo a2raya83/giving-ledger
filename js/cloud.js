@@ -27,7 +27,7 @@
     sb.auth.onAuthStateChange((_event, s) => {
       const prevId = session && session.user ? session.user.id : null;
       const nextId = s && s.user ? s.user.id : null;
-      if (prevId !== nextId) { persistQueue(); queue = []; draining = false; }   // pending work belongs to the previous user; park it under their key
+      if (prevId !== nextId) newGeneration();   // pending work belongs to the previous user; park it under their key
       const was = !!session; session = s;
       if (!!s !== was || prevId !== nextId) handlers.onAuth(Cloud.user());
     });
@@ -42,7 +42,7 @@
     return true;
   };
   Cloud.signOut = async function () {
-    persistQueue(); queue = []; draining = false;        // park unsent edits under this user's key; nobody else can drain them
+    newGeneration();                                     // park unsent edits under this user's key; nobody else can drain them
     await unsubscribe(); Cloud.currentHousehold = null; known = new Map();
     await sb.auth.signOut();
   };
@@ -103,7 +103,7 @@
     return entries;
   }
   Cloud.selectHousehold = async function (hh) {
-    if (Cloud.currentHousehold && Cloud.currentHousehold.id !== hh.id) { persistQueue(); queue = []; draining = false; }   // pending work stays with its own household
+    if (!Cloud.currentHousehold || Cloud.currentHousehold.id !== hh.id) newGeneration();   // pending work stays with its own household
     await unsubscribe();
     Cloud.currentHousehold = hh;
     const entries = await fetchEntries();
@@ -128,16 +128,34 @@
 
   /* ---------------- write queue with status ---------------- */
   // sync(entries): diff the app's entries against what the server last had, queue the writes,
-  // and drain them one at a time. Status events: saving → saved | failed | offline.
+  // and drain them one at a time. Status events: saving → saved | failed | offline | denied.
+  //
+  // Integrity rules (each one closes a reproduced bug):
+  //  * Every queued operation is FROZEN when submitted (a deep copy). A later edit of the same entry
+  //    never mutates an operation that may already be in flight; it becomes a separate operation
+  //    that waits its turn.
+  //  * A drain is BOUND to a generation (user + household + queue instance). Switching household,
+  //    changing user or signing out bumps the generation; a response that comes back afterwards may
+  //    not touch the new queue. It only removes its own operation from the parked copy of the old
+  //    queue, so nothing is lost and nothing is re-sent.
+  //  * The version an update is checked against is read from `known` at send time, never stored.
   let queue = [];
   let draining = false;
-  // The queue key includes the signed-in user, so an edit queued offline by one person is never
-  // uploaded by whoever signs in next on the same browser.
+  let generation = 0;
+  let seq = 0;
+  let inFlight = null;                 // the operation currently being sent, if any
   const QKEY = () => "gl_cloud_queue_" + (session && session.user ? session.user.id : "anon") + "_" + (Cloud.currentHousehold ? Cloud.currentHousehold.id : "none");
   const isAccessError = e => { const m = String((e && e.message) || "").toLowerCase(); return /row-level security|permission denied|42501|jwt|not authorized|403|401/.test(m) || (e && (e.status === 401 || e.status === 403)); };
+  const freeze = v => JSON.parse(JSON.stringify(v));
   function persistQueue() { try { if (queue.length) localStorage.setItem(QKEY(), JSON.stringify(queue)); else localStorage.removeItem(QKEY()); } catch (e) {} }
+  // Park the current queue under its own key and start a fresh generation. In-flight work finishes
+  // against the OLD generation and can no longer affect the new queue.
+  function newGeneration() { persistQueue(); queue = []; inFlight = null; draining = false; generation++; }
   Cloud.pendingWrites = () => queue.length;
-  Cloud.restoreQueue = function () { try { const q = JSON.parse(localStorage.getItem(QKEY()) || "[]"); if (Array.isArray(q) && q.length) { queue = q.concat(queue); return drain(); } } catch (e) {} return Promise.resolve(); };
+  Cloud.restoreQueue = function () {
+    try { const q = JSON.parse(localStorage.getItem(QKEY()) || "[]"); if (Array.isArray(q) && q.length) { queue = q.filter(op => !queue.some(x => x.seq === op.seq)).concat(queue); return drain(); } } catch (e) {}
+    return Promise.resolve();
+  };
 
   Cloud.sync = function (entries) {
     if (!Cloud.currentHousehold) return Promise.resolve();
@@ -145,12 +163,14 @@
     entries.forEach(e => {
       ids.add(e.id);
       const s = sig(e); const k = known.get(e.id);
-      const existing = queue.find(op => op.id === e.id && op.type !== "delete");
-      if (existing) { existing.body = e; existing.sig = s; return; }       // coalesce repeated edits
-      if (!k) queue.push({ type: "insert", id: e.id, body: e, sig: s });
-      else if (k.sig !== s) queue.push({ type: "update", id: e.id, body: e, sig: s, version: k.version });
+      const pending = queue.find(op => op.id === e.id && op.type !== "delete" && op !== inFlight);
+      if (pending) { pending.body = freeze(e); pending.sig = s; return; }          // coalesce into a NOT-yet-sent op only
+      const sent = inFlight && inFlight.id === e.id && inFlight.type !== "delete" ? inFlight : null;
+      if (sent) { if (sent.sig !== s) queue.push({ type: "update", id: e.id, body: freeze(e), sig: s, seq: ++seq }); return; }   // wait behind the in-flight op
+      if (!k) queue.push({ type: "insert", id: e.id, body: freeze(e), sig: s, seq: ++seq });
+      else if (k.sig !== s) queue.push({ type: "update", id: e.id, body: freeze(e), sig: s, seq: ++seq });
     });
-    for (const [id] of known) if (!ids.has(id) && !queue.some(op => op.id === id && op.type === "delete")) { queue = queue.filter(op => op.id !== id); queue.push({ type: "delete", id }); }
+    for (const [id] of known) if (!ids.has(id) && !queue.some(op => op.id === id && op.type === "delete")) { queue = queue.filter(op => op.id !== id || op === inFlight); queue.push({ type: "delete", id, seq: ++seq }); }
     persistQueue();
     return drain();
   };
@@ -158,22 +178,25 @@
   async function drain() {
     if (draining) return;
     draining = true;
+    const gen = generation, key = QKEY(), myQueue = queue;
     if (queue.length) handlers.onStatus("saving");
     let failed = null;
-    while (queue.length) {
-      const op = queue[0];
+    while (myQueue.length && gen === generation && myQueue === queue) {
+      const op = myQueue[0]; inFlight = op;
       try {
         if (typeof navigator !== "undefined" && navigator.onLine === false) throw Object.assign(new Error("offline"), { offline: true });
-        await apply(op);
-        queue.shift(); persistQueue();
+        await apply(op, gen);
+        if (gen !== generation || myQueue !== queue) { forgetParked(key, op); break; }     // stale: the world moved on while we waited
+        if (myQueue[0] === op) myQueue.shift();
+        persistQueue();
       } catch (e) {
+        if (gen !== generation || myQueue !== queue) break;                               // stale failure: the parked copy keeps the op for a later retry
         failed = e; break;
       }
     }
-    draining = false;
+    if (gen !== generation || myQueue !== queue) { if (inFlight && myQueue.includes(inFlight)) {} inFlight = null; return; }   // report nothing for a superseded generation
+    inFlight = null; draining = false;
     if (failed && !failed.offline && isAccessError(failed)) {
-      // Access was revoked (removed from the household, role changed, plan lapsed): stop retrying,
-      // drop the queue for this household, and tell the app so it can leave the ledger.
       const dropped = queue.length; queue = []; persistQueue();
       Cloud.lastError = failed.message; handlers.onStatus("denied", failed.message);
       handlers.onAccessLost({ household: Cloud.currentHousehold, dropped, message: failed.message });
@@ -182,35 +205,44 @@
     if (failed) { Cloud.lastError = failed.message; handlers.onStatus(failed.offline ? "offline" : "failed", failed.message); }
     else { Cloud.lastError = null; handlers.onStatus("saved"); }
   }
+  // Remove one completed operation from a parked queue (stored under an old user/household key).
+  function forgetParked(key, op) {
+    try { const q = JSON.parse(localStorage.getItem(key) || "[]"); const rest = q.filter(x => x.seq !== op.seq); if (rest.length) localStorage.setItem(key, JSON.stringify(rest)); else localStorage.removeItem(key); } catch (e) {}
+  }
   Cloud.retry = () => drain();
   window.addEventListener("online", () => { if (queue.length) drain(); });
 
-  async function apply(op) {
+  async function apply(op, gen) {
     const hid = Cloud.currentHousehold.id;
+    const body = Object.assign({}, op.body); delete body.id;
+    const opSig = op.sig;                                       // captured now; the op object is frozen anyway
     const fail = error => { const e = new Error(error.message || "write failed"); e.code = error.code; e.status = error.status; if (error.code === "42501" || error.status === 401 || error.status === 403) e.message = "permission denied: " + e.message; throw e; };
+    const remember = (id, version) => { if (gen === generation) known.set(id, { sig: opSig, version }); };
     if (op.type === "delete") {
       const { error } = await sb.from("entries").delete().eq("household_id", hid).eq("id", op.id);
       if (error) fail(error);
-      known.delete(op.id); return;
+      if (gen === generation) known.delete(op.id); return;
     }
-    const body = Object.assign({}, op.body); delete body.id;
-    if (op.type === "insert" || !known.has(op.id)) {
+    const k = known.get(op.id);
+    if (op.type === "insert" || !k) {
       const { data, error } = await sb.from("entries").insert({ id: op.id, household_id: hid, body, version: 1 }).select("version").maybeSingle();
       if (error && error.code !== "23505") fail(error);
-      if (error && error.code === "23505") { await resolveConflict(op); return; }   // someone else created this id
-      known.set(op.id, { sig: op.sig, version: data ? data.version : 1 }); return;
+      if (error && error.code === "23505") { await resolveConflict(op, gen); return; }   // someone else created this id
+      remember(op.id, data ? data.version : 1); return;
     }
-    const { data, error } = await sb.from("entries").update({ body, version: op.version + 1 }).eq("household_id", hid).eq("id", op.id).eq("version", op.version).select("version");
+    const expected = k.version;                                 // read at send time, never from the op
+    const { data, error } = await sb.from("entries").update({ body, version: expected + 1 }).eq("household_id", hid).eq("id", op.id).eq("version", expected).select("version");
     if (error) fail(error);
-    if (!data || !data.length) { await resolveConflict(op); return; }
-    known.set(op.id, { sig: op.sig, version: data[0].version });
+    if (!data || !data.length) { await resolveConflict(op, gen); return; }
+    remember(op.id, data[0].version);
   }
   // The server row changed under us (edited on another device). Server wins as the base; the local
   // edit is handed to the app to keep as an "Import conflict"-style copy, unless the content matches.
-  async function resolveConflict(op) {
+  async function resolveConflict(op, gen) {
     const { data, error } = await sb.from("entries").select("id, body, version").eq("household_id", Cloud.currentHousehold.id).eq("id", op.id).maybeSingle();
     if (error) throw new Error(error.message);
-    if (!data) { known.delete(op.id); queue[0] = { type: "insert", id: op.id, body: op.body, sig: op.sig }; return apply(queue[0]); }
+    if (gen !== generation) return;
+    if (!data) { known.delete(op.id); const again = Object.assign({}, op, { type: "insert" }); queue[0] = again; return apply(again, gen); }
     const server = window.Store.sanitizeEntry(Object.assign({}, data.body, { id: data.id }));
     known.set(op.id, { sig: sig(server), version: data.version });
     if (sig(server) === op.sig) return;
@@ -364,14 +396,20 @@
     const freshById = new Map(fresh.map(e => [e.id, e]));
     const missingEntries = rows.filter(r => { const got = freshById.get(r.id); return !got || sig(got) !== sig(window.Store.sanitizeEntry(Object.assign({}, r.body, { id: r.id }))); }).map(r => r.id);
     const missingReceipts = [];
-    const referencedLocal = [...new Set(entries.flatMap(e => e.receiptIds || []))].filter(id => idMap.has(id));
+    // 1. every receipt an entry references must exist locally AND read back from the household intact
+    const referencedLocal = [...new Set(entries.flatMap(e => e.receiptIds || []))];
+    // 2. every file this run copied or reused (including unlinked ones) must read back intact,
+    //    because the app will offer to delete the local originals afterwards
+    const toVerify = [...new Set(referencedLocal.concat(files.map(r => r.id)))];
     let n = 0;
-    for (const localId of referencedLocal) {
-      n++; progress(`Verifying receipt ${n} of ${referencedLocal.length}…`);
+    for (const localId of toVerify) {
+      n++; progress(`Verifying receipt ${n} of ${toVerify.length}…`);
       const local = localReceipts.find(r => r.id === localId); const cloudId = idMap.get(localId);
+      if (!local) { missingReceipts.push(localId + " (referenced by an entry but the file is not on this device)"); continue; }
+      if (!cloudId) { missingReceipts.push(localId + " (not copied)"); continue; }
       try {
         const remote = await Cloud.files.fetchBlob({ id: cloudId, path: pathFor(cloudId) });
-        if (!local || !remote || (await sha256(remote)) !== (await sha256(local.blob))) missingReceipts.push(cloudId);
+        if (!remote || (await sha256(remote)) !== (await sha256(local.blob))) missingReceipts.push(cloudId);
       } catch (e) { missingReceipts.push(cloudId); }
     }
     const verified = !missingEntries.length && !missingReceipts.length;

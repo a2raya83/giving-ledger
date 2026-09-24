@@ -13,6 +13,8 @@ const tables = { entries: new Map(), receipts: new Map(), households: new Map(),
 const keyOf = (name, r) => name === "household_members" ? r.household_id + "|" + r.user_id : r.id;
 const objects = new Map();          // storage: path -> Blob
 let failNext = 0, denyWrites = false, sessionUser = null, corruptDownloads = false;
+let gate = null;                    // when set, writes wait on this promise (models an in-flight request)
+const holdWrites = () => { let release; gate = new Promise(r => { release = r; }); return () => { const g = gate; gate = null; release(); return g; }; };
 function builder(name) {
   const q = { _op: null, _payload: null, _filters: [], _select: null, _single: false };
   const chain = {
@@ -26,7 +28,7 @@ function builder(name) {
     is(col, v) { q._filters.push({ col, v, m: "is" }); return chain; },
     order() { return chain; },
     maybeSingle() { q._single = true; return chain; }, single() { q._single = true; return chain; },
-    then(res, rej) { return Promise.resolve(exec()).then(res, rej); }
+    then(res, rej) { const run = () => exec(); const p = (gate && ["insert", "update", "delete"].includes(q._op)) ? gate.then(run) : Promise.resolve().then(run); return p.then(res, rej); }
   };
   const match = row => q._filters.every(f => f.m === "in" ? f.v.includes(row[f.col]) : f.m === "is" ? row[f.col] == f.v : f.m === "not-is" ? row[f.col] != f.v : row[f.col] === f.v);
   const embed = row => { if (name === "household_members" && /households\(/.test(q._select || "")) return Object.assign({}, row, { households: tables.households.get(row.household_id) || null }); return Object.assign({}, row); };
@@ -164,6 +166,30 @@ const toDataUrl = async blob => "data:" + (blob.type || "application/octet-strea
   t("imported entry's receiptIds point at the newly uploaded file", imp && imp.receiptIds.length === 1 && tables.receipts.has(imp.receiptIds[0]) && imp.receiptIds[0] !== "old-r1", imp && imp.receiptIds);
   t("uploaded receipt is linked to the entry", [...tables.receipts.values()][0].entry_id === "imp1");
 
+  /* ---- acceptance 5: an edit made while a save is in flight is not lost ---- */
+  await Cloud.sync(committed.entries);
+  let release = holdWrites();
+  const base = committed.entries;
+  const p1 = Cloud.sync(base.concat([mk("race", 1000)]));           // first save: in flight, held by the gate
+  await new Promise(r => setTimeout(r, 10));
+  const p2 = Cloud.sync(base.concat([mk("race", 2000)]));           // user edits again before the response returns
+  release(); await p1; await p2; await Cloud.retry();
+  t("edit during an in-flight save: server ends with the newer value", T.get("race") && T.get("race").body.amount === 2000, T.get("race") && T.get("race").body);
+  t("edit during an in-flight save: queue empty and status Saved only after the newer edit landed", Cloud.pendingWrites() === 0 && statuses[statuses.length - 1] === "saved");
+
+  /* ---- acceptance 6: an old response never modifies the newly active queue ---- */
+  release = holdWrites();
+  const pA = Cloud.sync(base.concat([mk("race", 2000), mk("slowA", 1)]));   // household A save, held in flight
+  await new Promise(r => setTimeout(r, 10));
+  await Cloud.selectHousehold(HH2);                                            // user switches to household B while A is pending
+  const pB = Cloud.sync([mk("newB", 7)]);                                      // new work in B (held by the same gate)
+  release(); await pA; await pB; await Cloud.retry();
+  t("household switch during a pending save: B's new entry is stored in B", T.has("newB") && T.get("newB").household_id === HH2.id, T.get("newB"));
+  t("household switch during a pending save: A's entry landed in A, not B", T.has("slowA") && T.get("slowA").household_id === HH.id);
+  t("household switch during a pending save: nothing left pending, status Saved", Cloud.pendingWrites() === 0 && statuses[statuses.length - 1] === "saved");
+  await Cloud.selectHousehold(HH); await Cloud.restoreQueue();
+  t("returning to A does not re-send the completed save (parked copy was updated)", [...T.values()].filter(r => r.id === "slowA").length === 1 && Cloud.pendingWrites() === 0);
+
   /* ---- acceptance 3: migration preserves differing same-id entries and verifies bytes ---- */
   await Cloud.sync(committed.entries);
   const localFile = { id: "loc-r1", entryId: "mig1", name: "m.png", type: "image/png", size: 5, blob: new Blob(["hello"], { type: "image/png" }) };
@@ -183,6 +209,12 @@ const toDataUrl = async blob => "data:" + (blob.type || "application/octet-strea
   const localState3 = { entries: [mk("mig3", 7, { receiptIds: ["loc-r3"], hasReceiptDecl: true })], settings: {} };
   const r3 = await Cloud.migrateLocal(localState3, [{ id: "loc-r3", entryId: "mig3", name: "x.png", type: "image/png", size: 3, blob: new Blob(["xyz"]) }], () => {});
   t("migration: a receipt that reads back with different bytes is reported, verified=false", r3.verified === false && r3.missingReceipts.length === 1, r3);
+  corruptDownloads = false;
+  const r4 = await Cloud.migrateLocal({ entries: [mk("mig4", 3, { receiptIds: ["ghost"], hasReceiptDecl: true })], settings: {} }, [], () => {});
+  t("migration: an entry referencing a file that is missing locally is flagged, verified=false", r4.verified === false && r4.missingReceipts.some(m => /ghost/.test(m)), r4.missingReceipts);
+  corruptDownloads = true;
+  const r5 = await Cloud.migrateLocal({ entries: [], settings: {} }, [{ id: "loc-unlinked", entryId: null, name: "u.png", type: "image/png", size: 2, blob: new Blob(["ab"]) }], () => {});
+  t("migration: an unlinked receipt that reads back corrupted is flagged, verified=false", r5.verified === false && r5.missingReceipts.length === 1, r5);
   corruptDownloads = false;
 
   console.log(fails ? `\n${fails} FAILED` : "\nALL PASS");

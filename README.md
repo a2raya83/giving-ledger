@@ -113,7 +113,10 @@ How it behaves:
   export. Invitations expire after 14 days and must be accepted by the invited email address.
 - **Saving.** Every change is written through immediately. The pill in the top bar shows Saving,
   Saved, Save failed (click to retry) or Offline (retries when back online). Unsent writes survive a
-  reload.
+  reload. Each queued operation is frozen when submitted, so editing an entry again while its save is
+  still in flight produces a second operation that waits its turn; the newer edit is never lost.
+  Every in-flight save is bound to the user, household and queue it started in; a response that
+  arrives after you switched household or account cannot touch the new queue.
 - **Simultaneous edits.** Each entry carries a version. If two devices edit the same entry, the
   first write wins and the second is kept as an "Import conflict" copy for the user to resolve, the
   same workflow as backup merges. Other devices see changes live.
@@ -127,7 +130,7 @@ How it behaves:
   households can never submit them; they resume only when that person opens that household again.
 - **Migration** treats a local entry whose id already exists in the household as identical (skipped)
   or different (kept as an import conflict); it never overwrites or drops it. Every referenced receipt
-  is downloaded back and compared by SHA-256 before the app offers to remove the device copy.
+  is downloaded back and compared by SHA-256 before the app offers to remove the device copy, and so is every copied file, linked or not. A referenced file that is missing on the device is reported rather than ignored.
 
 ## Optional donation ask
 

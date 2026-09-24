@@ -25,7 +25,8 @@ records on a site you don't run a backend for. Backup & restore moves data betwe
 | `js/app.js` | UI logic |
 | `test/rules.test.js` | Rules-engine tests (`node test/rules.test.js`) |
 | `test/data.test.js` | Storage-layer tests: nested-change signatures, merge conflicts, conflict exclusion (`node test/data.test.js`) |
-| `test/cloud.test.js` | Cloud sync tests against a fake Supabase client: diffing, versions, conflicts, retry, offline queue (`node test/cloud.test.js`) |
+| `test/cloud.test.js` | Cloud sync tests against a fake Supabase client: diffing, versions, conflicts, retry, offline queue, per-user queues, revoked access (`node test/cloud.test.js`) |
+| `test/live.test.js` | Live integration test against a real Supabase project through the raw REST/Auth/Storage APIs (see Tests) |
 | `test/browser-failure-tests.js` | Failure-mode tests to paste into the browser console on a running copy |
 | `serve.js` | Local preview server (`node serve.js`, then open http://localhost:8765) |
 | `original-donation-tracker.html` | The single-file tracker this replaced, kept for reference |
@@ -63,11 +64,47 @@ accountant. Setup takes about ten minutes:
 2. In **Authentication → URL Configuration**, set the Site URL to where the app is hosted (for
    example `https://a2raya83.github.io/giving-ledger/`) and add it to the redirect allow list.
    Magic-link email sign-in is on by default; no password provider is needed.
-3. In **Project Settings → API**, copy the Project URL and the `anon` public key into
-   `js/config.js` under `cloud`. The anon key is designed to ship in client code; the policies in
-   the schema are what protect the data.
-4. Push. The app shows a **Sign in** button. The first sign-in creates a household ledger and offers
+3. **Email delivery (required for public sign-in).** Supabase's built-in email sender only delivers
+   to your own project team and is for testing. In **Authentication → SMTP Settings**, enable custom
+   SMTP with a provider such as Resend, using a verified sender address. Without this, magic links
+   never reach real users.
+4. In **Project Settings → API Keys**, copy the Project URL and the **publishable** key (or the
+   legacy `anon` key) into `js/config.js` under `cloud`. Both are client-side keys meant to ship in
+   the page; the row-level-security policies in the schema are what protect the data. Never put a
+   secret or `service_role` key in the site.
+5. Run the live integration test (below) against the new project before enabling public sign-ups.
+6. Push. The app shows a **Sign in** button. The first sign-in creates a household ledger and offers
    to copy the browser's records into it, verifying the copy before offering to remove the local one.
+
+### Plans
+
+The plan belongs to the household, so invited members don't each pay:
+
+| Plan | Includes | Price |
+|---|---|---|
+| Free | Device-only tracking, value guide, exports, manual backups | $0 |
+| Household | Cloud saving, phone/computer access, household sharing, receipt storage, viewer access, year-end export | Free during beta; intended price shown in the app (a hypothesis to test, set in `js/config.js`) |
+
+`households.plan_status` drives enforcement server-side: `beta` and `active` allow writes; `past_due`
+and `canceled` make the household read-only while keeping every record and export available
+(retention). Billing fields can only be changed by a server-side billing process, never from the
+browser. Payment collection is not built yet; when it is, a webhook updates those fields.
+
+### Live integration test
+
+`test/live.test.js` exercises a real project through the raw REST, Auth and Storage APIs, without the
+app's own client, so it tests the permissions themselves: two unrelated households can't see or
+change each other's entries or receipts; a viewer can read and export but not write, upload, delete
+or invite; two devices editing the same entry produce one winner and one preserved conflict; a
+removed member is denied on the next read and write; a migration retried after an interruption
+produces no duplicates. It needs the project URL, the publishable key and, for creating throwaway
+test users, the secret key, passed as environment variables on your own machine only:
+
+```bash
+SUPABASE_URL=https://xxxx.supabase.co SUPABASE_ANON_KEY=... SUPABASE_SERVICE_KEY=... node test/live.test.js
+```
+
+It creates users named `gl-test-*@example.com`, cleans up after itself, and never touches real data.
 
 How it behaves:
 

@@ -605,7 +605,9 @@
 
   /* ---------- boot ---------- */
   /* ---------- accounts & household ledgers ---------- */
-  const SAVE_LABELS = { saving: "Saving…", saved: "Saved", failed: "Save failed · retry", offline: "Offline · will retry" };
+  const SAVE_LABELS = { saving: "Saving…", saved: "Saved", failed: "Save failed · retry", offline: "Offline · will retry", denied: "Access removed" };
+  const PLANS = CFG.plans || {};
+  const planNotice = () => PLANS.betaFree ? `<p class="small muted" style="margin-top:8px">Cloud mode is in a free beta. Intended price afterwards: <b>${esc(PLANS.intendedPrice || "to be announced")}</b> per household, covering everyone you invite. ${esc(PLANS.retentionNote || "If you stop paying, your records and exports stay available; only adding and sharing pause.")}</p>` : "";
   function setSaveStatus(s, msg) {
     const el = $("saveStatus"); el.hidden = !cloudMode; el.dataset.state = s; el.textContent = SAVE_LABELS[s] || s; el.title = msg || "";
     el.onclick = (s === "failed" || s === "offline") ? () => Cloud.retry() : null;
@@ -681,7 +683,7 @@
         state.entries = res.all; await refreshReceipts(); renderYearPicker(); renderAll();
         close();
         if (res.verified) {
-          const c2 = modal(`<h3>Copied and verified</h3><p class="small">${res.entries} entr${res.entries === 1 ? "y" : "ies"} and ${res.receipts} receipt${res.receipts === 1 ? "" : "s"} were read back from the household ledger successfully${res.skipped ? ` (${res.skipped} already there, skipped)` : ""}. The device-only copy is still on this browser.</p>
+          const c2 = modal(`<h3>Copied and verified</h3><p class="small">${res.entries} entr${res.entries === 1 ? "y" : "ies"} and ${res.receipts} receipt${res.receipts === 1 ? "" : "s"} were read back from the household ledger successfully${res.skipped || res.receiptsReused ? ` (${res.skipped} entr${res.skipped === 1 ? "y" : "ies"} and ${res.receiptsReused} receipt${res.receiptsReused === 1 ? "" : "s"} were already there from an earlier attempt)` : ""}. The device-only copy is still on this browser.</p>
             <div class="actions"><button class="btn danger" id="migClear" type="button">Remove the device copy</button><button class="btn" data-close type="button">Keep it for now</button></div>`);
           $("migClear").addEventListener("click", async () => { window.Store.saveState({ entries: [], settings: {} }); await window.Store.clearReceipts().catch(() => {}); c2(); toast("Device copy removed. Your records live in the household ledger now."); });
         } else {
@@ -693,7 +695,7 @@
   function accountModal() {
     const user = Cloud.user();
     if (!user) {
-      const close = modal(`<h3>Sign in</h3><p class="small">We'll email you a sign-in link. No password to remember. Your records then follow you to any device, and you can share a ledger with your household.</p>
+      const close = modal(`<h3>Sign in</h3><p class="small">We'll email you a sign-in link. No password to remember. Your records then follow you to any device, and you can share a ledger with your household.</p>${planNotice()}
         <div class="field w12" style="margin-top:10px"><label for="siEmail">Email</label><input id="siEmail" type="email" autocomplete="email" placeholder="you@example.com"></div>
         <div class="actions"><button class="btn primary" id="siGo" type="button">Email me a link</button><button class="btn" data-close type="button">Cancel</button></div><p class="small" id="siMsg"></p>`);
       $("siGo").addEventListener("click", async () => {
@@ -706,7 +708,7 @@
       return;
     }
     const hh = Cloud.currentHousehold;
-    const close = modal(`<h3>${esc(hh ? hh.name : "Your account")}</h3><p class="small">Signed in as ${esc(user.email)}${hh ? ` · your role: ${hh.role}` : ""}</p>
+    const close = modal(`<h3>${esc(hh ? hh.name : "Your account")}</h3><p class="small">Signed in as ${esc(user.email)}${hh ? ` · your role: ${hh.role} · ${esc(Cloud.planLabel())}` : ""}</p>${hh ? planNotice() : ""}
       <div id="acctBody" style="margin-top:10px"><p class="small muted">Loading…</p></div>
       <div class="actions"><button class="btn" id="acctSwitch" type="button">Switch household</button><button class="btn" id="acctOut" type="button">Sign out</button><button class="btn" data-close type="button" style="margin-left:auto">Close</button></div>`, { wide: true });
     $("acctOut").addEventListener("click", async () => { await Cloud.signOut(); close(); leaveCloud(); toast("Signed out. This browser is back to device-only mode."); });
@@ -771,6 +773,10 @@
             state.entries = entries; refreshReceipts().then(() => { renderYearPicker(); renderAll(); });
             if (mine && before && window.Store.signature(mine) !== window.Store.signature(before)) toast("The entry you're editing was changed on another device. Saving will keep both versions for review.", true);
             else toast("Ledger updated from another device");
+          },
+          onAccessLost: info => {
+            toast(`You no longer have write access to “${info.household ? info.household.name : "this ledger"}”. ${info.dropped ? info.dropped + " unsent change" + (info.dropped > 1 ? "s were" : " was") + " discarded. " : ""}Reloading your households…`, true);
+            afterSignIn(Cloud.user());
           },
           onConflict: (local, server) => {
             const idx = state.entries.findIndex(e => e.id === server.id);

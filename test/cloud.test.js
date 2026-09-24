@@ -7,6 +7,8 @@ const t = (name, cond) => { console.log((cond ? "PASS" : "FAIL") + "  " + name);
 // ---- fake supabase: an in-memory "entries" table with the query-builder subset cloud.js uses ----
 const table = new Map();           // id -> { id, household_id, body, version }
 let failNext = 0;                  // make the next N writes fail
+let denyWrites = false;            // simulate revoked access (RLS rejects writes)
+let sessionUser = null;            // current fake session
 function builder(name) {
   const q = { _op: null, _payload: null, _filters: [], _select: null, _single: false };
   const chain = {
@@ -16,7 +18,7 @@ function builder(name) {
     delete() { q._op = "delete"; return chain; },
     eq(col, v) { q._filters.push([col, v]); return chain; },
     in(col, vs) { q._filters.push([col, vs, "in"]); return chain; },
-    is() { return chain; }, order() { return chain; },
+    is() { return chain; }, not() { return chain; }, order() { return chain; },
     maybeSingle() { q._single = true; return chain; }, single() { q._single = true; return chain; },
     then(res, rej) { return Promise.resolve(exec()).then(res, rej); }
   };
@@ -24,6 +26,7 @@ function builder(name) {
   function exec() {
     if (name !== "entries") return { data: [], error: null };
     if (["insert", "update", "delete"].includes(q._op) && failNext > 0) { failNext--; return { data: null, error: { message: "simulated network failure" } }; }
+    if (["insert", "update", "delete"].includes(q._op) && denyWrites) return { data: null, error: { code: "42501", status: 403, message: "new row violates row-level security policy" } };
     if (q._op === "select") { const rows = [...table.values()].filter(match); return { data: q._single ? (rows[0] || null) : rows, error: null }; }
     if (q._op === "insert") {
       const rows = Array.isArray(q._payload) ? q._payload : [q._payload];
@@ -37,7 +40,7 @@ function builder(name) {
   return chain;
 }
 const fakeClient = {
-  auth: { getSession: async () => ({ data: { session: null } }), onAuthStateChange() {}, signOut: async () => {} },
+  auth: { getSession: async () => ({ data: { session: sessionUser ? { user: sessionUser } : null } }), onAuthStateChange(cb) { fakeClient._authCb = cb; }, signOut: async () => { sessionUser = null; fakeClient._authCb && fakeClient._authCb("SIGNED_OUT", null); } },
   from: builder,
   rpc: async () => ({ data: null, error: null }),
   channel() { const ch = { on() { return ch; }, subscribe() { return ch; } }; return ch; },
@@ -52,12 +55,13 @@ global.localStorage = { _m: {}, getItem(k) { return this._m[k] == null ? null : 
 global.location = { origin: "https://example.test", pathname: "/", href: "https://example.test/" };
 for (const f of ["fmv", "rules", "data", "cloud"]) eval(fs.readFileSync(path.join(__dirname, "../js/" + f + ".js"), "utf8"));
 const Cloud = window.Cloud, Store = window.Store;
-const statuses = []; const conflicts = [];
+const statuses = []; const conflicts = []; const lost = [];
 const HH = { id: "11111111-1111-1111-1111-111111111111", name: "Test", role: "owner" };
 const mk = (id, amount) => Store.sanitizeEntry({ id, kind: "cash", date: "2026-03-01", org: "Food Bank", amount, bankRecord: true });
 
 (async () => {
-  await Cloud.init({ onStatus: s => statuses.push(s), onConflict: (l, s) => conflicts.push({ l, s }) });
+  sessionUser = { id: "user-alice", email: "alice@example.test" };
+  await Cloud.init({ onStatus: s => statuses.push(s), onConflict: (l, s) => conflicts.push({ l, s }), onAccessLost: info => lost.push(info) });
   const entries = await Cloud.selectHousehold(HH);
   t("empty household loads no entries", entries.length === 0 && Cloud.currentHousehold.id === HH.id);
 
@@ -106,8 +110,25 @@ const mk = (id, amount) => Store.sanitizeEntry({ id, kind: "cash", date: "2026-0
   // queue survives a reload (persisted in localStorage)
   failNext = 1;
   await Cloud.sync([mk("a", 999), mk("c", 5), mk("d", 12)]);
-  const persisted = JSON.parse(localStorage.getItem("gl_cloud_queue_" + HH.id) || "[]");
+  const persisted = JSON.parse(localStorage.getItem("gl_cloud_queue_user-alice_" + HH.id) || "[]");
   t("pending writes are persisted for the next load", persisted.length === 1 && persisted[0].id === "d");
+
+  // queue is scoped to the signed-in user: another account on the same browser never drains it
+  t("queue key is scoped to the user and household", Object.keys(localStorage._m).some(k => k === "gl_cloud_queue_user-alice_" + HH.id));
+  const aliceQueue = localStorage.getItem("gl_cloud_queue_user-alice_" + HH.id);
+  await Cloud.signOut();
+  sessionUser = { id: "user-bob", email: "bob@example.test" }; fakeClient._authCb("SIGNED_IN", { user: sessionUser });
+  await Cloud.selectHousehold(HH); await Cloud.restoreQueue();
+  t("Bob signing in does not upload Alice's queued edit", table.get("d").body.amount === 11 && localStorage.getItem("gl_cloud_queue_user-alice_" + HH.id) === aliceQueue);
+  sessionUser = { id: "user-alice", email: "alice@example.test" }; fakeClient._authCb("SIGNED_IN", { user: sessionUser });
+  await Cloud.selectHousehold(HH); await Cloud.restoreQueue();
+  t("Alice signing back in drains her own queue", table.get("d").body.amount === 12 && Cloud.pendingWrites() === 0);
+
+  // access revoked: RLS rejects the write → queue dropped, app notified, no endless retry
+  denyWrites = true;
+  await Cloud.sync([mk("a", 999), mk("c", 5), mk("d", 12), mk("e", 1)]);
+  t("revoked access → status 'denied', queue dropped, onAccessLost fired", statuses[statuses.length - 1] === "denied" && Cloud.pendingWrites() === 0 && lost.length === 1 && lost[0].dropped === 1 && !table.has("e"));
+  denyWrites = false;
 
   // signature-preserving mergeEntries still applies to cloud conflicts (reuse of existing logic)
   const m = Store.mergeEntries([mk("z", 1)], [mk("z", 2)]);

@@ -15,7 +15,7 @@
   const BUCKET = "receipts";
   const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   const sig = e => window.Store.signature(e);
-  let handlers = { onAuth: () => {}, onStatus: () => {}, onRemoteChange: () => {}, onConflict: () => {} };
+  let handlers = { onAuth: () => {}, onStatus: () => {}, onRemoteChange: () => {}, onConflict: () => {}, onAccessLost: () => {} };
   let session = null;
   let channel = null;
 
@@ -39,9 +39,9 @@
 
   /* ---------------- households & access ---------------- */
   Cloud.households = async function () {
-    const { data, error } = await sb.from("household_members").select("role, households(id, name, created_at)").order("joined_at");
+    const { data, error } = await sb.from("household_members").select("role, households(id, name, created_at, plan, plan_status, plan_renews_at, canceled_at)").order("joined_at");
     if (error) throw new Error(error.message);
-    return (data || []).filter(r => r.households).map(r => ({ id: r.households.id, name: r.households.name, role: r.role }));
+    return (data || []).filter(r => r.households).map(r => ({ id: r.households.id, name: r.households.name, role: r.role, plan: r.households.plan || "household", planStatus: r.households.plan_status || "beta", renewsAt: r.households.plan_renews_at, canceledAt: r.households.canceled_at }));
   };
   Cloud.createHousehold = async function (name) {
     const { data, error } = await sb.rpc("create_household", { p_name: name });
@@ -77,7 +77,8 @@
     const { error } = await sb.from("household_members").delete().eq("household_id", Cloud.currentHousehold.id).eq("user_id", userId);
     if (error) throw new Error(error.message);
   };
-  Cloud.canWrite = () => !!Cloud.currentHousehold && Cloud.currentHousehold.role !== "viewer";
+  Cloud.canWrite = () => { const h = Cloud.currentHousehold; return !!h && h.role !== "viewer" && !["canceled", "past_due"].includes(h.planStatus || "beta"); };
+  Cloud.planLabel = () => { const h = Cloud.currentHousehold; if (!h) return ""; const st = h.planStatus || "beta"; return st === "beta" ? "Household plan · free beta" : st === "active" ? "Household plan" : st === "canceled" ? "Household plan canceled · read-only" : st === "past_due" ? "Payment overdue · read-only" : st; };
 
   /* ---------------- ledger load + realtime ---------------- */
   let known = new Map(); // id -> { sig, version } as last seen on the server
@@ -117,7 +118,10 @@
   // and drain them one at a time. Status events: saving → saved | failed | offline.
   let queue = [];
   let draining = false;
-  const QKEY = () => "gl_cloud_queue_" + (Cloud.currentHousehold ? Cloud.currentHousehold.id : "none");
+  // The queue key includes the signed-in user, so an edit queued offline by one person is never
+  // uploaded by whoever signs in next on the same browser.
+  const QKEY = () => "gl_cloud_queue_" + (session && session.user ? session.user.id : "anon") + "_" + (Cloud.currentHousehold ? Cloud.currentHousehold.id : "none");
+  const isAccessError = e => { const m = String((e && e.message) || "").toLowerCase(); return /row-level security|permission denied|42501|jwt|not authorized|403|401/.test(m) || (e && (e.status === 401 || e.status === 403)); };
   function persistQueue() { try { if (queue.length) localStorage.setItem(QKEY(), JSON.stringify(queue)); else localStorage.removeItem(QKEY()); } catch (e) {} }
   Cloud.pendingWrites = () => queue.length;
   Cloud.restoreQueue = function () { try { const q = JSON.parse(localStorage.getItem(QKEY()) || "[]"); if (Array.isArray(q) && q.length) { queue = q.concat(queue); return drain(); } } catch (e) {} return Promise.resolve(); };
@@ -154,6 +158,14 @@
       }
     }
     draining = false;
+    if (failed && !failed.offline && isAccessError(failed)) {
+      // Access was revoked (removed from the household, role changed, plan lapsed): stop retrying,
+      // drop the queue for this household, and tell the app so it can leave the ledger.
+      const dropped = queue.length; queue = []; persistQueue();
+      Cloud.lastError = failed.message; handlers.onStatus("denied", failed.message);
+      handlers.onAccessLost({ household: Cloud.currentHousehold, dropped, message: failed.message });
+      return;
+    }
     if (failed) { Cloud.lastError = failed.message; handlers.onStatus(failed.offline ? "offline" : "failed", failed.message); }
     else { Cloud.lastError = null; handlers.onStatus("saved"); }
   }
@@ -162,20 +174,21 @@
 
   async function apply(op) {
     const hid = Cloud.currentHousehold.id;
+    const fail = error => { const e = new Error(error.message || "write failed"); e.code = error.code; e.status = error.status; if (error.code === "42501" || error.status === 401 || error.status === 403) e.message = "permission denied: " + e.message; throw e; };
     if (op.type === "delete") {
       const { error } = await sb.from("entries").delete().eq("household_id", hid).eq("id", op.id);
-      if (error) throw new Error(error.message);
+      if (error) fail(error);
       known.delete(op.id); return;
     }
     const body = Object.assign({}, op.body); delete body.id;
     if (op.type === "insert" || !known.has(op.id)) {
       const { data, error } = await sb.from("entries").insert({ id: op.id, household_id: hid, body, version: 1 }).select("version").maybeSingle();
-      if (error && error.code !== "23505") throw new Error(error.message);
+      if (error && error.code !== "23505") fail(error);
       if (error && error.code === "23505") { await resolveConflict(op); return; }   // someone else created this id
       known.set(op.id, { sig: op.sig, version: data ? data.version : 1 }); return;
     }
     const { data, error } = await sb.from("entries").update({ body, version: op.version + 1 }).eq("household_id", hid).eq("id", op.id).eq("version", op.version).select("version");
-    if (error) throw new Error(error.message);
+    if (error) fail(error);
     if (!data || !data.length) { await resolveConflict(op); return; }
     known.set(op.id, { sig: op.sig, version: data[0].version });
   }
@@ -286,14 +299,19 @@
     const referenced = new Set(entries.flatMap(e => e.receiptIds || []));
     const files = localReceipts.filter(r => referenced.has(r.id) || !r.entryId);
     const idMap = new Map();
-    let uploaded = 0;
+    let uploaded = 0, reused = 0;
+    // Receipts already copied by an earlier, interrupted run are found by their original id and reused.
+    const { data: prior, error: priorErr } = await sb.from("receipts").select("id, source_id").eq("household_id", hid).not("source_id", "is", null);
+    if (priorErr) throw new Error(priorErr.message);
+    (prior || []).forEach(p => idMap.set(p.source_id, p.id));
     for (const r of files) {
-      progress(`Uploading receipt ${uploaded + 1} of ${files.length}…`);
+      if (idMap.has(r.id)) { reused++; continue; }
+      progress(`Uploading receipt ${uploaded + 1} of ${files.length - reused}…`);
       const id = uid(); const path = pathFor(id);
       const { error: upErr } = await sb.storage.from(BUCKET).upload(path, r.blob, { contentType: r.type || "application/octet-stream" });
       if (upErr) throw new Error("Upload failed for " + r.name + ": " + upErr.message);
-      const { error } = await sb.from("receipts").insert({ id, household_id: hid, entry_id: null, name: r.name, type: r.type || "", size: r.size, path });
-      if (error) throw new Error("Could not record " + r.name + ": " + error.message);
+      const { error } = await sb.from("receipts").insert({ id, household_id: hid, entry_id: null, name: r.name, type: r.type || "", size: r.size, path, source_id: r.id });
+      if (error) { await sb.storage.from(BUCKET).remove([path]).catch(() => {}); throw new Error("Could not record " + r.name + ": " + error.message); }
       idMap.set(r.id, id); uploaded++;
     }
     const rows = entries.filter(e => !existing.has(e.id)).map(e => { const body = Object.assign({}, e, { receiptIds: (e.receiptIds || []).map(id => idMap.get(id) || id) }); delete body.id; delete body.sample; return { id: e.id, household_id: hid, body, version: 1 }; });
@@ -312,7 +330,7 @@
     if (recErr) throw new Error(recErr.message);
     const missingReceipts = [...idMap.values()].filter(id => !(recRows || []).some(r => r.id === id));
     const verified = !missingEntries.length && !missingReceipts.length;
-    return { entries: rows.length, skipped: entries.length - rows.length, receipts: uploaded, verified, missingEntries, missingReceipts, all: fresh };
+    return { entries: rows.length, skipped: entries.length - rows.length, receipts: uploaded, receiptsReused: reused, verified, missingEntries, missingReceipts, all: fresh };
   };
 
   window.Cloud = Cloud;

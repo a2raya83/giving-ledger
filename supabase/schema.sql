@@ -11,8 +11,18 @@ create table if not exists public.households (
   id         uuid primary key default gen_random_uuid(),
   name       text not null check (char_length(name) between 1 and 120),
   created_by uuid not null references auth.users(id) on delete cascade,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  -- Plan structure lives on the household, so invited members never pay separately.
+  -- beta: free during the beta · active: paid · past_due / canceled: read-only (records and exports stay available)
+  plan           text not null default 'household' check (plan in ('household')),
+  plan_status    text not null default 'beta' check (plan_status in ('beta','active','past_due','canceled')),
+  plan_renews_at timestamptz,
+  canceled_at    timestamptz
 );
+alter table public.households add column if not exists plan text not null default 'household';
+alter table public.households add column if not exists plan_status text not null default 'beta';
+alter table public.households add column if not exists plan_renews_at timestamptz;
+alter table public.households add column if not exists canceled_at timestamptz;
 
 create table if not exists public.household_members (
   household_id uuid not null references public.households(id) on delete cascade,
@@ -56,20 +66,28 @@ create table if not exists public.receipts (
   type         text not null default '',
   size         integer not null default 0,
   path         text not null,                     -- storage object: <household_id>/<receipt id>
+  source_id    text,                              -- original id when copied from a device ledger (makes migration retries idempotent)
   created_by   uuid default auth.uid(),
   created_at   timestamptz not null default now(),
   primary key (household_id, id)
 );
 create index if not exists receipts_household_idx on public.receipts(household_id);
+alter table public.receipts add column if not exists source_id text;
+create unique index if not exists receipts_source_idx on public.receipts(household_id, source_id) where source_id is not null;
 
 -- ---------- helpers (security definer so policies don't recurse) ----------
 create or replace function public.is_member(p_household uuid)
 returns boolean language sql stable security definer set search_path = public as $$
   select exists (select 1 from public.household_members m where m.household_id = p_household and m.user_id = auth.uid());
 $$;
+-- Writing needs a writer role AND a household whose plan allows changes. A canceled or past-due
+-- household stays readable and exportable (retention), but nothing new can be added.
 create or replace function public.can_write(p_household uuid)
 returns boolean language sql stable security definer set search_path = public as $$
-  select exists (select 1 from public.household_members m where m.household_id = p_household and m.user_id = auth.uid() and m.role in ('owner','member'));
+  select exists (
+    select 1 from public.household_members m join public.households h on h.id = m.household_id
+    where m.household_id = p_household and m.user_id = auth.uid() and m.role in ('owner','member')
+      and h.plan_status in ('beta','active'));
 $$;
 create or replace function public.is_owner(p_household uuid)
 returns boolean language sql stable security definer set search_path = public as $$
@@ -124,7 +142,20 @@ alter table public.receipts enable row level security;
 drop policy if exists hh_select on public.households;
 create policy hh_select on public.households for select using (public.is_member(id));
 drop policy if exists hh_update on public.households;
-create policy hh_update on public.households for update using (public.is_owner(id));
+create policy hh_update on public.households for update using (public.is_owner(id))
+  with check (public.is_owner(id));
+-- Billing fields change only through a server-side process (a payment webhook with the service key),
+-- never from the browser: this trigger rejects client-side edits to them.
+create or replace function public.protect_plan_fields() returns trigger language plpgsql as $$
+begin
+  if auth.role() = 'authenticated' and (new.plan is distinct from old.plan or new.plan_status is distinct from old.plan_status
+      or new.plan_renews_at is distinct from old.plan_renews_at or new.canceled_at is distinct from old.canceled_at) then
+    raise exception 'plan fields can only be changed by the billing process';
+  end if;
+  return new;
+end $$;
+drop trigger if exists households_protect_plan on public.households;
+create trigger households_protect_plan before update on public.households for each row execute function public.protect_plan_fields();
 drop policy if exists hh_delete on public.households;
 create policy hh_delete on public.households for delete using (public.is_owner(id));
 -- inserts happen only through create_household()

@@ -4,7 +4,16 @@ window.SITE_CONFIG = {
   // Leave both empty to run in device-only mode. See README → "Accounts and household ledgers".
   cloud: {
     url: "",       // e.g. "https://abcdefghijklmnop.supabase.co"
-    anonKey: ""    // the project's anon (public) key — safe to ship; row-level security does the protecting
+    anonKey: ""    // the project's PUBLISHABLE key (or legacy anon key). Both are client-side keys meant to ship
+                   // in the page; row-level security does the protecting. NEVER put a secret / service_role key here.
+  },
+
+  // Plans (household-level; invited members never pay separately). Enforcement is server-side via
+  // households.plan_status; these values only drive the wording shown to users.
+  plans: {
+    betaFree: true,                    // show the free-beta notice with the intended price
+    intendedPrice: "$19/year",         // a price to test, not a settled number
+    retentionNote: "If you stop paying, your records and exports stay available; only adding and sharing pause."
   },
 
   // Optional "support this site" ask. Set enabled to true once you've added at least one link.

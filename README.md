@@ -116,7 +116,10 @@ How it behaves:
   reload. Each queued operation is frozen when submitted, so editing an entry again while its save is
   still in flight produces a second operation that waits its turn; the newer edit is never lost.
   Every in-flight save is bound to the user, household and queue it started in; a response that
-  arrives after you switched household or account cannot touch the new queue.
+  arrives after you switched household or account cannot touch the new queue. An edit remembers the
+  server version it was made against: if someone else changed the entry while your edit waited
+  offline, yours is kept as a conflict copy rather than written over theirs. Deleting an entry also
+  drops its unsent work, so something created and deleted offline is never uploaded.
 - **Simultaneous edits.** Each entry carries a version. If two devices edit the same entry, the
   first write wins and the second is kept as an "Import conflict" copy for the user to resolve, the
   same workflow as backup merges. Other devices see changes live.

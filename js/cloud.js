@@ -134,16 +134,23 @@
   //  * Every queued operation is FROZEN when submitted (a deep copy). A later edit of the same entry
   //    never mutates an operation that may already be in flight; it becomes a separate operation
   //    that waits its turn.
-  //  * A drain is BOUND to a generation (user + household + queue instance). Switching household,
-  //    changing user or signing out bumps the generation; a response that comes back afterwards may
-  //    not touch the new queue. It only removes its own operation from the parked copy of the old
-  //    queue, so nothing is lost and nothing is re-sent.
-  //  * The version an update is checked against is read from `known` at send time, never stored.
+  //  * An edit records the server version and content it was made against (its BASE). If the server
+  //    has moved on by the time the edit is sent (someone else changed it while this edit was parked
+  //    offline), the edit is not applied over their change: it goes through conflict resolution.
+  //  * A drain is BOUND to a generation (user + household). Switching household, changing user or
+  //    signing out bumps the generation; a response that comes back afterwards may not touch the new
+  //    queue. It only removes its own operation from the parked copy of the old queue.
+  //  * Within a generation the queue array is only ever mutated IN PLACE, so a running drain can
+  //    never lose track of it and stall.
+  //  * Removing an entry removes its unsent work too: an entry created offline and deleted before
+  //    reconnecting is never uploaded; an entry the server has (or will have, because its insert is in
+  //    flight) gets a delete operation.
   let queue = [];
   let draining = false;
   let generation = 0;
-  let seq = 0;
+  let seqCounter = 0;
   let inFlight = null;                 // the operation currently being sent, if any
+  const nextSeq = () => Date.now().toString(36) + "-" + (++seqCounter);
   const QKEY = () => "gl_cloud_queue_" + (session && session.user ? session.user.id : "anon") + "_" + (Cloud.currentHousehold ? Cloud.currentHousehold.id : "none");
   const isAccessError = e => { const m = String((e && e.message) || "").toLowerCase(); return /row-level security|permission denied|42501|jwt|not authorized|403|401/.test(m) || (e && (e.status === 401 || e.status === 403)); };
   const freeze = v => JSON.parse(JSON.stringify(v));
@@ -153,24 +160,32 @@
   function newGeneration() { persistQueue(); queue = []; inFlight = null; draining = false; generation++; }
   Cloud.pendingWrites = () => queue.length;
   Cloud.restoreQueue = function () {
-    try { const q = JSON.parse(localStorage.getItem(QKEY()) || "[]"); if (Array.isArray(q) && q.length) { queue = q.filter(op => !queue.some(x => x.seq === op.seq)).concat(queue); return drain(); } } catch (e) {}
+    try { const q = JSON.parse(localStorage.getItem(QKEY()) || "[]"); if (Array.isArray(q) && q.length) { const fresh = q.filter(op => !queue.some(x => x.seq === op.seq)); queue.unshift(...fresh); return drain(); } } catch (e) {}
     return Promise.resolve();
   };
 
   Cloud.sync = function (entries) {
     if (!Cloud.currentHousehold) return Promise.resolve();
-    const ids = new Set();
+    const ids = new Set(entries.map(e => e.id));
     entries.forEach(e => {
-      ids.add(e.id);
       const s = sig(e); const k = known.get(e.id);
       const pending = queue.find(op => op.id === e.id && op.type !== "delete" && op !== inFlight);
-      if (pending) { pending.body = freeze(e); pending.sig = s; return; }          // coalesce into a NOT-yet-sent op only
+      if (pending) { pending.body = freeze(e); pending.sig = s; return; }          // coalesce into a NOT-yet-sent op; its base is kept
       const sent = inFlight && inFlight.id === e.id && inFlight.type !== "delete" ? inFlight : null;
-      if (sent) { if (sent.sig !== s) queue.push({ type: "update", id: e.id, body: freeze(e), sig: s, seq: ++seq }); return; }   // wait behind the in-flight op
-      if (!k) queue.push({ type: "insert", id: e.id, body: freeze(e), sig: s, seq: ++seq });
-      else if (k.sig !== s) queue.push({ type: "update", id: e.id, body: freeze(e), sig: s, seq: ++seq });
+      if (sent) { if (sent.sig !== s) queue.push({ type: "update", id: e.id, body: freeze(e), sig: s, seq: nextSeq(), base: null }); return; }   // base resolved once the in-flight op lands
+      if (!k) queue.push({ type: "insert", id: e.id, body: freeze(e), sig: s, seq: nextSeq(), base: null });
+      else if (k.sig !== s) queue.push({ type: "update", id: e.id, body: freeze(e), sig: s, seq: nextSeq(), base: { version: k.version, sig: k.sig } });
     });
-    for (const [id] of known) if (!ids.has(id) && !queue.some(op => op.id === id && op.type === "delete")) { queue = queue.filter(op => op.id !== id || op === inFlight); queue.push({ type: "delete", id, seq: ++seq }); }
+    // Removals: anything the app no longer has, whether the server knows it or it only exists as queued work.
+    const removed = new Set();
+    for (const [id] of known) if (!ids.has(id)) removed.add(id);
+    queue.forEach(op => { if (op.type !== "delete" && !ids.has(op.id)) removed.add(op.id); });
+    removed.forEach(id => {
+      if (queue.some(op => op.id === id && op.type === "delete")) return;
+      const serverWillHaveIt = known.has(id) || (inFlight && inFlight.id === id && inFlight.type !== "delete");
+      for (let i = queue.length - 1; i >= 0; i--) if (queue[i].id === id && queue[i] !== inFlight) queue.splice(i, 1);   // drop unsent work in place
+      if (serverWillHaveIt) queue.push({ type: "delete", id, seq: nextSeq() });
+    });
     persistQueue();
     return drain();
   };
@@ -178,26 +193,26 @@
   async function drain() {
     if (draining) return;
     draining = true;
-    const gen = generation, key = QKEY(), myQueue = queue;
+    const gen = generation, key = QKEY();
     if (queue.length) handlers.onStatus("saving");
     let failed = null;
-    while (myQueue.length && gen === generation && myQueue === queue) {
-      const op = myQueue[0]; inFlight = op;
+    while (queue.length && gen === generation) {
+      const op = queue[0]; inFlight = op;
       try {
         if (typeof navigator !== "undefined" && navigator.onLine === false) throw Object.assign(new Error("offline"), { offline: true });
         await apply(op, gen);
-        if (gen !== generation || myQueue !== queue) { forgetParked(key, op); break; }     // stale: the world moved on while we waited
-        if (myQueue[0] === op) myQueue.shift();
+        if (gen !== generation) { forgetParked(key, op); break; }      // stale: the world moved on while we waited
+        const i = queue.indexOf(op); if (i >= 0) queue.splice(i, 1);
         persistQueue();
       } catch (e) {
-        if (gen !== generation || myQueue !== queue) break;                               // stale failure: the parked copy keeps the op for a later retry
+        if (gen !== generation) break;                                    // stale failure: the parked copy keeps the op for a later retry
         failed = e; break;
       }
     }
-    if (gen !== generation || myQueue !== queue) { if (inFlight && myQueue.includes(inFlight)) {} inFlight = null; return; }   // report nothing for a superseded generation
+    if (gen !== generation) return;                                       // superseded generation: report nothing, touch nothing
     inFlight = null; draining = false;
     if (failed && !failed.offline && isAccessError(failed)) {
-      const dropped = queue.length; queue = []; persistQueue();
+      const dropped = queue.length; queue.splice(0, queue.length); persistQueue();
       Cloud.lastError = failed.message; handlers.onStatus("denied", failed.message);
       handlers.onAccessLost({ household: Cloud.currentHousehold, dropped, message: failed.message });
       return;
@@ -215,7 +230,7 @@
   async function apply(op, gen) {
     const hid = Cloud.currentHousehold.id;
     const body = Object.assign({}, op.body); delete body.id;
-    const opSig = op.sig;                                       // captured now; the op object is frozen anyway
+    const opSig = op.sig;
     const fail = error => { const e = new Error(error.message || "write failed"); e.code = error.code; e.status = error.status; if (error.code === "42501" || error.status === 401 || error.status === 403) e.message = "permission denied: " + e.message; throw e; };
     const remember = (id, version) => { if (gen === generation) known.set(id, { sig: opSig, version }); };
     if (op.type === "delete") {
@@ -230,7 +245,10 @@
       if (error && error.code === "23505") { await resolveConflict(op, gen); return; }   // someone else created this id
       remember(op.id, data ? data.version : 1); return;
     }
-    const expected = k.version;                                 // read at send time, never from the op
+    // The server must still be at the version this edit was made against. If it moved on while the
+    // edit was parked (someone else saved), do not overwrite their change: resolve as a conflict.
+    if (op.base && (op.base.version !== k.version || op.base.sig !== k.sig)) { await resolveConflict(op, gen); return; }
+    const expected = op.base ? op.base.version : k.version;
     const { data, error } = await sb.from("entries").update({ body, version: expected + 1 }).eq("household_id", hid).eq("id", op.id).eq("version", expected).select("version");
     if (error) fail(error);
     if (!data || !data.length) { await resolveConflict(op, gen); return; }
@@ -242,7 +260,7 @@
     const { data, error } = await sb.from("entries").select("id, body, version").eq("household_id", Cloud.currentHousehold.id).eq("id", op.id).maybeSingle();
     if (error) throw new Error(error.message);
     if (gen !== generation) return;
-    if (!data) { known.delete(op.id); const again = Object.assign({}, op, { type: "insert" }); queue[0] = again; return apply(again, gen); }
+    if (!data) { known.delete(op.id); const again = Object.assign({}, op, { type: "insert", base: null }); const i = queue.indexOf(op); if (i >= 0) queue[i] = again; inFlight = again; return apply(again, gen); }
     const server = window.Store.sanitizeEntry(Object.assign({}, data.body, { id: data.id }));
     known.set(op.id, { sig: sig(server), version: data.version });
     if (sig(server) === op.sig) return;

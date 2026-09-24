@@ -190,6 +190,44 @@ const toDataUrl = async blob => "data:" + (blob.type || "application/octet-strea
   await Cloud.selectHousehold(HH); await Cloud.restoreQueue();
   t("returning to A does not re-send the completed save (parked copy was updated)", [...T.values()].filter(r => r.id === "slowA").length === 1 && Cloud.pendingWrites() === 0);
 
+  /* ---- acceptance 7: created offline, deleted before reconnecting → never uploaded ---- */
+  await Cloud.selectHousehold(HH); await Cloud.restoreQueue();
+  const snapshot = () => [...T.values()].filter(r => r.household_id === HH.id).map(r => Store.sanitizeEntry(Object.assign({}, r.body, { id: r.id })));
+  let cur = snapshot();
+  navigator.onLine = false;
+  await Cloud.sync(cur.concat([mk("ghostNew", 55)]));
+  t("offline create is queued", Cloud.pendingWrites() === 1 && statuses[statuses.length - 1] === "offline");
+  await Cloud.sync(cur);                                                        // deleted again before reconnecting
+  t("deleting an unsent offline entry drops its queued insert", Cloud.pendingWrites() === 0);
+  navigator.onLine = true; await Cloud.retry();
+  t("after reconnect the deleted entry was never uploaded; status Saved", !T.has("ghostNew") && statuses[statuses.length - 1] === "saved");
+
+  /* ---- acceptance 8: offline edit parked, someone else edits the original, edit returns → conflict, not overwrite ---- */
+  cur = snapshot();
+  const target = cur.find(e => e.id === "d");
+  navigator.onLine = false;
+  await Cloud.sync(cur.map(e => e.id === "d" ? mk("d", 5000) : e));            // Alice's offline edit of d
+  navigator.onLine = true;
+  await Cloud.selectHousehold(HH2);                                             // parks it
+  T.get("d").body.amount = 777; T.get("d").version += 1;                        // someone else edits d meanwhile
+  const conflictsBefore = conflicts.length;
+  await Cloud.selectHousehold(HH); await Cloud.restoreQueue(); await Cloud.retry();
+  t("returning parked edit does not overwrite the other person's change", T.get("d").body.amount === 777, T.get("d").body);
+  t("it is surfaced as a conflict instead", conflicts.length === conflictsBefore + 1 && conflicts[conflicts.length - 1].l.amount === 5000 && conflicts[conflicts.length - 1].s.amount === 777);
+  t("queue drained, status Saved", Cloud.pendingWrites() === 0 && statuses[statuses.length - 1] === "saved");
+
+  /* ---- acceptance 9: delete an existing entry while another save is pending → no stall ---- */
+  cur = snapshot();
+  release = holdWrites();
+  const pP = Cloud.sync(cur.concat([mk("pendingNew", 9)]));                     // in flight, held
+  await new Promise(r => setTimeout(r, 10));
+  const pD = Cloud.sync(cur.filter(e => e.id !== "a").concat([mk("pendingNew", 9)]));   // delete a while the insert is pending
+  release(); await pP; await pD; await Cloud.retry();
+  t("delete during a pending save: both operations reach the server", T.has("pendingNew") && !T.has("a"), { pending: Cloud.pendingWrites(), hasA: T.has("a") });
+  t("delete during a pending save: nothing pending, status Saved (no stall)", Cloud.pendingWrites() === 0 && statuses[statuses.length - 1] === "saved");
+  await Cloud.sync(snapshot());
+  t("a later save still works (drain not locked)", Cloud.pendingWrites() === 0 && statuses[statuses.length - 1] === "saved");
+
   /* ---- acceptance 3: migration preserves differing same-id entries and verifies bytes ---- */
   await Cloud.sync(committed.entries);
   const localFile = { id: "loc-r1", entryId: "mig1", name: "m.png", type: "image/png", size: 5, blob: new Blob(["hello"], { type: "image/png" }) };

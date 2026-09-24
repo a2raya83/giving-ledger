@@ -1,5 +1,7 @@
 # Giving Ledger
 
+Live site: https://a2raya83.github.io/giving-ledger/ · Source: https://github.com/a2raya83/giving-ledger
+
 A public, static web app for tracking charitable donations the way the IRS expects:
 cash gifts, donated goods with fair-market-value guidance, gifts of stock, volunteer
 mileage, and out-of-pocket volunteer expenses, with receipts attached to each entry.

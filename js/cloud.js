@@ -145,11 +145,20 @@
   //  * Removing an entry removes its unsent work too: an entry created offline and deleted before
   //    reconnecting is never uploaded; an entry the server has (or will have, because its insert is in
   //    flight) gets a delete operation.
+  //  * A follow-up edit (made while the previous edit of the same entry was in flight) DEPENDS on that
+  //    predecessor having saved. If the predecessor ended in a conflict, the follow-up does not adopt
+  //    the freshly fetched server version and overwrite it; it goes through conflict resolution too,
+  //    and only the latest local version is preserved as the conflict copy.
+  //  * Every applied operation reports an OUTCOME: saved, conflict, or stale. A parked operation is
+  //    removed only after a confirmed write; a conflict detected while the generation was superseded
+  //    is not handled (the app would file the copy under the wrong household) and stays parked for
+  //    the next visit, when it is resolved properly.
   let queue = [];
   let draining = false;
   let generation = 0;
   let seqCounter = 0;
   let inFlight = null;                 // the operation currently being sent, if any
+  const outcomes = new Map();          // seq -> "saved" | "conflict" (consumed by dependent follow-up edits)
   const nextSeq = () => Date.now().toString(36) + "-" + (++seqCounter);
   const QKEY = () => "gl_cloud_queue_" + (session && session.user ? session.user.id : "anon") + "_" + (Cloud.currentHousehold ? Cloud.currentHousehold.id : "none");
   const isAccessError = e => { const m = String((e && e.message) || "").toLowerCase(); return /row-level security|permission denied|42501|jwt|not authorized|403|401/.test(m) || (e && (e.status === 401 || e.status === 403)); };
@@ -172,7 +181,7 @@
       const pending = queue.find(op => op.id === e.id && op.type !== "delete" && op !== inFlight);
       if (pending) { pending.body = freeze(e); pending.sig = s; return; }          // coalesce into a NOT-yet-sent op; its base is kept
       const sent = inFlight && inFlight.id === e.id && inFlight.type !== "delete" ? inFlight : null;
-      if (sent) { if (sent.sig !== s) queue.push({ type: "update", id: e.id, body: freeze(e), sig: s, seq: nextSeq(), base: null }); return; }   // base resolved once the in-flight op lands
+      if (sent) { if (sent.sig !== s) queue.push({ type: "update", id: e.id, body: freeze(e), sig: s, seq: nextSeq(), base: null, dependsOn: sent.seq }); return; }   // waits for its predecessor's outcome
       if (!k) queue.push({ type: "insert", id: e.id, body: freeze(e), sig: s, seq: nextSeq(), base: null });
       else if (k.sig !== s) queue.push({ type: "update", id: e.id, body: freeze(e), sig: s, seq: nextSeq(), base: { version: k.version, sig: k.sig } });
     });
@@ -200,8 +209,8 @@
       const op = queue[0]; inFlight = op;
       try {
         if (typeof navigator !== "undefined" && navigator.onLine === false) throw Object.assign(new Error("offline"), { offline: true });
-        await apply(op, gen);
-        if (gen !== generation) { forgetParked(key, op); break; }      // stale: the world moved on while we waited
+        const outcome = await apply(op, gen);
+        if (gen !== generation) { if (outcome === "saved") forgetParked(key, op); break; }   // stale: only a CONFIRMED write is forgotten; anything else stays parked
         const i = queue.indexOf(op); if (i >= 0) queue.splice(i, 1);
         persistQueue();
       } catch (e) {
@@ -232,39 +241,52 @@
     const body = Object.assign({}, op.body); delete body.id;
     const opSig = op.sig;
     const fail = error => { const e = new Error(error.message || "write failed"); e.code = error.code; e.status = error.status; if (error.code === "42501" || error.status === 401 || error.status === 403) e.message = "permission denied: " + e.message; throw e; };
-    const remember = (id, version) => { if (gen === generation) known.set(id, { sig: opSig, version }); };
+    const remember = (id, version) => { if (gen === generation) known.set(id, { sig: opSig, version }); outcomes.set(op.seq, "saved"); return "saved"; };
     if (op.type === "delete") {
       const { error } = await sb.from("entries").delete().eq("household_id", hid).eq("id", op.id);
       if (error) fail(error);
-      if (gen === generation) known.delete(op.id); return;
+      if (gen === generation) known.delete(op.id); outcomes.set(op.seq, "saved"); return "saved";
+    }
+    // A follow-up edit is only valid if its predecessor actually saved. If the predecessor ended in a
+    // conflict (or never confirmed), this edit builds on a local chain the server never accepted.
+    if (op.dependsOn) {
+      const pred = outcomes.get(op.dependsOn); outcomes.delete(op.dependsOn);
+      if (pred !== "saved") return resolveConflict(op, gen);
     }
     const k = known.get(op.id);
     if (op.type === "insert" || !k) {
       const { data, error } = await sb.from("entries").insert({ id: op.id, household_id: hid, body, version: 1 }).select("version").maybeSingle();
       if (error && error.code !== "23505") fail(error);
-      if (error && error.code === "23505") { await resolveConflict(op, gen); return; }   // someone else created this id
-      remember(op.id, data ? data.version : 1); return;
+      if (error && error.code === "23505") return resolveConflict(op, gen);   // someone else created this id
+      return remember(op.id, data ? data.version : 1);
     }
     // The server must still be at the version this edit was made against. If it moved on while the
     // edit was parked (someone else saved), do not overwrite their change: resolve as a conflict.
-    if (op.base && (op.base.version !== k.version || op.base.sig !== k.sig)) { await resolveConflict(op, gen); return; }
+    if (op.base && (op.base.version !== k.version || op.base.sig !== k.sig)) return resolveConflict(op, gen);
     const expected = op.base ? op.base.version : k.version;
     const { data, error } = await sb.from("entries").update({ body, version: expected + 1 }).eq("household_id", hid).eq("id", op.id).eq("version", expected).select("version");
     if (error) fail(error);
-    if (!data || !data.length) { await resolveConflict(op, gen); return; }
-    remember(op.id, data[0].version);
+    if (!data || !data.length) return resolveConflict(op, gen);
+    return remember(op.id, data[0].version);
   }
   // The server row changed under us (edited on another device). Server wins as the base; the local
   // edit is handed to the app to keep as an "Import conflict"-style copy, unless the content matches.
+  // Returns "saved" (re-inserted after the row vanished), "conflict" (preserved via the app), or
+  // "stale" (generation superseded before it could be handled: the op stays parked, nothing is lost).
   async function resolveConflict(op, gen) {
     const { data, error } = await sb.from("entries").select("id, body, version").eq("household_id", Cloud.currentHousehold.id).eq("id", op.id).maybeSingle();
     if (error) throw new Error(error.message);
-    if (gen !== generation) return;
-    if (!data) { known.delete(op.id); const again = Object.assign({}, op, { type: "insert", base: null }); const i = queue.indexOf(op); if (i >= 0) queue[i] = again; inFlight = again; return apply(again, gen); }
+    if (gen !== generation) return "stale";
+    if (!data) { known.delete(op.id); const again = Object.assign({}, op, { type: "insert", base: null, dependsOn: null }); const i = queue.indexOf(op); if (i >= 0) queue[i] = again; inFlight = again; return apply(again, gen); }
     const server = window.Store.sanitizeEntry(Object.assign({}, data.body, { id: data.id }));
     known.set(op.id, { sig: sig(server), version: data.version });
-    if (sig(server) === op.sig) return;
+    outcomes.set(op.seq, "conflict");
+    if (sig(server) === op.sig) return "saved";                                   // same content already there: nothing to preserve
+    // If a follow-up edit of the same entry is queued, it holds the latest local version; let it carry
+    // the conflict so the user gets one copy (the newest), not one per keystroke.
+    if (queue.some(x => x !== op && x.id === op.id && x.type !== "delete" && x.dependsOn === op.seq)) return "conflict";
     handlers.onConflict(op.body, server);
+    return "conflict";
   }
 
   /* ---------------- receipts (private storage) ---------------- */

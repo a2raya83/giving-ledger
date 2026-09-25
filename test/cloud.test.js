@@ -228,6 +228,35 @@ const toDataUrl = async blob => "data:" + (blob.type || "application/octet-strea
   await Cloud.sync(snapshot());
   t("a later save still works (drain not locked)", Cloud.pendingWrites() === 0 && statuses[statuses.length - 1] === "saved");
 
+  /* ---- acceptance 10: two local edits queued while another person changes the entry ---- */
+  cur = snapshot();
+  release = holdWrites();
+  const p10a = Cloud.sync(cur.map(e => e.id === "d" ? mk("d", 100) : e));      // first local edit, in flight (held)
+  await new Promise(r => setTimeout(r, 10));
+  const p10b = Cloud.sync(cur.map(e => e.id === "d" ? mk("d", 200) : e));      // second local edit, queued behind it
+  T.get("d").body.amount = 777; T.get("d").version += 1;                        // someone else saves meanwhile
+  const c10 = conflicts.length;
+  release(); await p10a; await p10b; await Cloud.retry();
+  t("two queued edits vs a remote change: the other person's value survives ($777, not $200)", T.get("d").body.amount === 777, T.get("d").body);
+  t("exactly one conflict copy is offered, holding the latest local version ($200)", conflicts.length === c10 + 1 && conflicts[conflicts.length - 1].l.amount === 200 && conflicts[conflicts.length - 1].s.amount === 777, conflicts.slice(c10).map(c => c.l.amount));
+  t("queue drained, status Saved", Cloud.pendingWrites() === 0 && statuses[statuses.length - 1] === "saved");
+
+  /* ---- acceptance 11: switch households before a conflicting save finishes ---- */
+  await Cloud.selectHousehold(HH); await Cloud.restoreQueue();                  // refresh known to the current server state
+  cur = snapshot();
+  T.get("d").body.amount = 888; T.get("d").version += 1;                        // server moves on: the next update will conflict
+  release = holdWrites();
+  const p11 = Cloud.sync(cur.map(e => e.id === "d" ? mk("d", 4321) : e));       // local edit, in flight (held), will conflict
+  await new Promise(r => setTimeout(r, 10));
+  const c11 = conflicts.length;
+  await Cloud.selectHousehold(HH2);                                             // user switches away before the response
+  release(); await p11; await Cloud.retry();
+  t("superseded conflict is not handled in the wrong household", conflicts.length === c11 && T.get("d").body.amount === 888);
+  const parked = JSON.parse(localStorage.getItem("gl_cloud_queue_user-alice_" + HH.id) || "[]");
+  t("the unsaved edit stays parked (not removed as if written)", parked.length === 1 && parked[0].body.amount === 4321, parked);
+  await Cloud.selectHousehold(HH); await Cloud.restoreQueue(); await Cloud.retry();
+  t("returning: the edit is preserved as a conflict copy, server value intact, nothing pending", conflicts.length === c11 + 1 && conflicts[conflicts.length - 1].l.amount === 4321 && T.get("d").body.amount === 888 && Cloud.pendingWrites() === 0);
+
   /* ---- acceptance 3: migration preserves differing same-id entries and verifies bytes ---- */
   await Cloud.sync(committed.entries);
   const localFile = { id: "loc-r1", entryId: "mig1", name: "m.png", type: "image/png", size: 5, blob: new Blob(["hello"], { type: "image/png" }) };

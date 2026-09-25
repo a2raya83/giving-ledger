@@ -119,7 +119,11 @@ How it behaves:
   arrives after you switched household or account cannot touch the new queue. An edit remembers the
   server version it was made against: if someone else changed the entry while your edit waited
   offline, yours is kept as a conflict copy rather than written over theirs. Deleting an entry also
-  drops its unsent work, so something created and deleted offline is never uploaded.
+  drops its unsent work, so something created and deleted offline is never uploaded. A follow-up
+  edit depends on its predecessor having saved: if the earlier edit ran into someone else's change,
+  the later one does not adopt and overwrite theirs either, and only the newest local version is
+  offered as the conflict copy. A parked edit is forgotten only after a confirmed write; a conflict
+  detected after you switched household stays parked and is resolved when you return.
 - **Simultaneous edits.** Each entry carries a version. If two devices edit the same entry, the
   first write wins and the second is kept as an "Import conflict" copy for the user to resolve, the
   same workflow as backup merges. Other devices see changes live.

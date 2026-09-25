@@ -27,6 +27,9 @@ records on a site you don't run a backend for. Backup & restore moves data betwe
 | `test/data.test.js` | Storage-layer tests: nested-change signatures, merge conflicts, conflict exclusion (`node test/data.test.js`) |
 | `test/cloud.test.js` | Cloud sync tests against a fake Supabase client: diffing, versions, conflicts, retry, offline queue, per-user queues, revoked access (`node test/cloud.test.js`) |
 | `test/live.test.js` | Live integration test against a real Supabase project through the raw REST/Auth/Storage APIs (see Tests) |
+| `test/fake-supabase.js` | Fake Supabase client (tables, storage, auth, realtime, response holds) shared by the cloud tests |
+| `test/make-harness.js` | Generates `test/cloud-harness.html`: the real app wired to the fake client |
+| `test/browser-cloud-tests.js` | End-to-end cloud tests through the real UI on the harness (form → state → queue → server → refreshed UI) |
 | `test/browser-failure-tests.js` | Failure-mode tests to paste into the browser console on a running copy |
 | `serve.js` | Local preview server (`node serve.js`, then open http://localhost:8765) |
 | `original-donation-tracker.html` | The single-file tracker this replaced, kept for reference |
@@ -123,7 +126,12 @@ How it behaves:
   edit depends on its predecessor having saved: if the earlier edit ran into someone else's change,
   the later one does not adopt and overwrite theirs either, and only the newest local version is
   offered as the conflict copy. A parked edit is forgotten only after a confirmed write; a conflict
-  detected after you switched household stays parked and is resolved when you return.
+  detected after you switched household stays parked and is resolved when you return. After parked
+  work is restored on load, the ledger is reconciled with the server plus anything still pending, so
+  the next save can't mistake a restored entry for a deletion. The edit form remembers the server
+  version it opened; if that entry changes on another device while the form is open, the refresh
+  updates the ledger but not the draft, and saving the draft keeps it as an import conflict instead
+  of overwriting the other person's change.
 - **Simultaneous edits.** Each entry carries a version. If two devices edit the same entry, the
   first write wins and the second is kept as an "Import conflict" copy for the user to resolve, the
   same workflow as backup merges. Other devices see changes live.
@@ -228,6 +236,13 @@ goods across categories and charities), run the site locally, open the browser c
 `test/browser-failure-tests.js`. It resets the browser's copy of the data first, so don't run it
 where real entries live. The script reloads the page once to test startup cleanup for real; paste
 it a second time after the reload to see the final results.
+
+For the cloud flows through the real UI without a Supabase project, run `node test/make-harness.js`,
+serve the site, open `/test/cloud-harness.html` (the app wired to `test/fake-supabase.js`), and
+paste `test/browser-cloud-tests.js` into the console. It signs in, saves through the form, simulates
+another device changing an entry while the edit form is open, reloads with parked work to test
+restore-and-reconcile, and checks that a later save doesn't delete the restored entry. Paste it a
+second time after the reload for the final results.
 
 ## Roadmap ideas
 

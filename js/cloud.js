@@ -111,6 +111,18 @@
     return entries;
   };
   Cloud.reload = fetchEntries;
+  // The server version + content an entry is currently known to have (captured by the edit form
+  // when editing begins, so a realtime refresh can't silently move the base under an open draft).
+  Cloud.baseFor = id => { const k = known.get(id); return k ? { version: k.version, sig: k.sig } : null; };
+  Cloud.changedSince = (id, base) => { const now = Cloud.baseFor(id); if (!base && !now) return false; if (!base || !now) return true; return now.version !== base.version || now.sig !== base.sig; };
+  // Server entries with this device's unsent edits laid on top, so the ledger the user sees (and the
+  // next save diffs against) reflects both confirmed data and pending work. Without this, a refresh
+  // would make the next save look like a deletion of a restored entry, or revert an offline edit.
+  Cloud.overlayPending = function (serverEntries) {
+    const out = new Map(serverEntries.map(e => [e.id, e]));
+    queue.forEach(op => { if (op.type === "delete") out.delete(op.id); else out.set(op.id, window.Store.sanitizeEntry(Object.assign({}, op.body, { id: op.id }))); });
+    return [...out.values()];
+  };
   function subscribe() {
     const hid = Cloud.currentHousehold.id;
     channel = sb.channel("hh-" + hid)

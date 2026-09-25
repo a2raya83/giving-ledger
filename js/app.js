@@ -17,6 +17,7 @@
   let receiptsCache = [];        // all receipt records (blobs in device mode, signed urls in cloud mode)
   let objectUrls = [];
   let editingId = null;
+  let editingBase = null;        // cloud mode: server version the open draft was loaded from
   let originalReceiptIds = [];   // receipts the entry had when editing began
   let pendingReceiptIds = [];    // receipts currently shown in the form
   let stagedRemovals = [];       // original receipts the user removed; deleted only on Save
@@ -193,7 +194,7 @@
   }
   async function fillForm(e) {
     await resetForm(false);
-    editingId = e.id; setKind(e.kind);
+    editingId = e.id; editingBase = cloudMode ? Cloud.baseFor(e.id) : null; setKind(e.kind);
     $("f_date").value = e.date || ""; $("f_donor").value = e.donor || ""; $("f_org").value = e.org || ""; $("f_notes").value = e.notes || ""; $("f_ack").checked = !!e.ackReceived; $("f_hasReceipt").checked = !!e.hasReceiptDecl;
     originalReceiptIds = (e.receiptIds || []).slice(); pendingReceiptIds = originalReceiptIds.slice(); stagedRemovals = [];
     if (e.kind === "cash") { $("f_amount_cash").value = e.amount || ""; $("f_method").value = e.method || "card"; $("f_checkNo").value = e.checkNo || ""; $("f_benefit").value = e.benefit || ""; $("f_bankRecord").checked = e.bankRecord !== false; }
@@ -213,7 +214,7 @@
     const orphans = pendingReceiptIds.filter(id => !originalReceiptIds.includes(id));
     for (const id of orphans) await releaseReceipt(id);
     if (orphans.length) await refreshReceipts();
-    form.reset(); editingId = null; pendingReceiptIds = []; originalReceiptIds = []; stagedRemovals = [];
+    form.reset(); editingId = null; editingBase = null; pendingReceiptIds = []; originalReceiptIds = []; stagedRemovals = [];
     $("f_date").value = keepDate && d ? d : new Date().toISOString().slice(0, 10);
     $("f_bankRecord").checked = true; $("f_longTerm").checked = true;
     $("itemRows").innerHTML = ""; if (currentKind === "noncash") addItemRow();
@@ -283,6 +284,18 @@
     if (num(e.benefit) > window.Rules.grossValue(e) && ["cash", "noncash"].includes(e.kind)) problems.push("a value received that isn't more than the gift itself");
     if (problems.length) { $("saveHint").textContent = "Please add " + problems.join(", ") + "."; return; }
 
+    if (cloudMode && editingId && editingBase && Cloud.changedSince(e.id, editingBase)) {
+      // Someone else saved this entry while the form was open. Their version stays; this draft is kept
+      // as an import-conflict copy for the user to compare, exactly like a merge conflict.
+      const copy = Object.assign({}, e, { id: window.Store.uid(), conflictOf: e.id, updatedAt: new Date().toISOString(), createdAt: new Date().toISOString() });
+      state.entries.push(copy);
+      if (!persist()) { state.entries.pop(); $("saveHint").textContent = "Not saved. Try again."; return; }
+      await Files().attachReceipts(copy.receiptIds, copy.id).catch(() => {});
+      originalReceiptIds = []; stagedRemovals = []; pendingReceiptIds = [];
+      await refreshReceipts(); await resetForm(); renderAll();
+      toast("This entry was changed on another device while you were editing. Your version was kept as an import conflict — choose which to keep in the ledger.", true);
+      return;
+    }
     const idx = state.entries.findIndex(x => x.id === e.id);
     const now = new Date().toISOString();
     e.updatedAt = now; e.createdAt = idx >= 0 ? state.entries[idx].createdAt : now;
@@ -632,6 +645,9 @@
     year = state.settings.year;
     try { localStorage.setItem("gl_household", hh.id); } catch (e) {}
     await Cloud.restoreQueue();
+    // Reconcile: parked work may just have reached the server, and some may still be pending.
+    // The ledger shown (and diffed on the next save) must be confirmed data + pending edits.
+    try { state.entries = Cloud.overlayPending(await Cloud.reload()); } catch (e) { toast("Loaded, but couldn't refresh from the server: " + e.message, true); }
     await refreshReceipts(); if (editingId) await resetForm();
     renderYearPicker(); renderAll(); renderAccountBar(); setSaveStatus(Cloud.pendingWrites() ? "saving" : "saved");
     return true;
@@ -770,7 +786,7 @@
           onRemoteChange: entries => {
             const mine = editingId ? entries.find(e => e.id === editingId) : null;
             const before = editingId ? state.entries.find(e => e.id === editingId) : null;
-            state.entries = entries; refreshReceipts().then(() => { renderYearPicker(); renderAll(); });
+            state.entries = Cloud.overlayPending(entries); refreshReceipts().then(() => { renderYearPicker(); renderAll(); });
             if (mine && before && window.Store.signature(mine) !== window.Store.signature(before)) toast("The entry you're editing was changed on another device. Saving will keep both versions for review.", true);
             else toast("Ledger updated from another device");
           },

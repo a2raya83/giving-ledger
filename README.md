@@ -27,6 +27,7 @@ records on a site you don't run a backend for. Backup & restore moves data betwe
 | `test/data.test.js` | Storage-layer tests: nested-change signatures, merge conflicts, conflict exclusion (`node test/data.test.js`) |
 | `test/cloud.test.js` | Cloud sync tests against a fake Supabase client: diffing, versions, conflicts, retry, offline queue, per-user queues, revoked access (`node test/cloud.test.js`) |
 | `test/live.test.js` | Live integration test against a real Supabase project through the raw REST/Auth/Storage APIs (see Tests) |
+| `test/LIVE-CHECKLIST.md` | Setup steps, the automated live run, and the manual two-browser checks to pass before opening sign-ups |
 | `test/fake-supabase.js` | Fake Supabase client (tables, storage, auth, realtime, response holds) shared by the cloud tests |
 | `test/make-harness.js` | Generates `test/cloud-harness.html`: the real app wired to the fake client |
 | `test/browser-cloud-tests.js` | End-to-end cloud tests through the real UI on the harness (form → state → queue → server → refreshed UI) |

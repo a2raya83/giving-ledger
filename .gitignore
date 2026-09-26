@@ -2,3 +2,5 @@
 Thumbs.db
 .DS_Store
 *.zip
+js/config.local.js
+test/.ui-users.json

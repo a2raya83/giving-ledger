@@ -1,10 +1,17 @@
 // Live integration test against a REAL Supabase project, using raw HTTP (REST, Auth, Storage) so
 // the permissions are tested directly, not through the app's client.
-//   SUPABASE_URL=https://xxxx.supabase.co SUPABASE_ANON_KEY=... SUPABASE_SERVICE_KEY=... node test/live.test.js
-// The secret key is used ONLY here, on your machine, to create and delete throwaway users. Never
-// put it in the site. Test users are gl-test-<n>@example.com and are removed at the end.
-const URL_ = process.env.SUPABASE_URL, ANON = process.env.SUPABASE_ANON_KEY, SERVICE = process.env.SUPABASE_SERVICE_KEY;
-if (!URL_ || !ANON || !SERVICE) { console.error("Set SUPABASE_URL, SUPABASE_ANON_KEY and SUPABASE_SERVICE_KEY."); process.exit(2); }
+//
+// Two ways to run it:
+//   1. With the secret key (creates and deletes throwaway users via the admin API):
+//      SUPABASE_URL=... SUPABASE_ANON_KEY=... SUPABASE_SERVICE_KEY=... node test/live.test.js
+//   2. Without any secret (TEST projects only): enable the Email provider with "Confirm email" OFF,
+//      so password sign-ups return a session directly. Test users are created with random passwords
+//      and cannot be deleted without the secret key, so use this only on a throwaway project:
+//      SUPABASE_URL=... SUPABASE_ANON_KEY=... node test/live.test.js
+// The secret key is never written anywhere; it is read from the environment of your own shell.
+const URL_ = process.env.SUPABASE_URL, ANON = process.env.SUPABASE_ANON_KEY, SERVICE = process.env.SUPABASE_SERVICE_KEY || "";
+if (!URL_ || !ANON) { console.error("Set SUPABASE_URL and SUPABASE_ANON_KEY (and optionally SUPABASE_SERVICE_KEY)."); process.exit(2); }
+if (!SERVICE) console.log("No SUPABASE_SERVICE_KEY: using password sign-ups (Confirm email must be OFF on this TEST project); test users are not deleted afterwards; the canceled-plan check is skipped.");
 let fails = 0;
 const t = (name, cond, extra) => { console.log((cond ? "PASS" : "FAIL") + "  " + name + (cond || extra == null ? "" : "   → " + JSON.stringify(extra).slice(0, 200))); if (!cond) fails++; };
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -21,6 +28,12 @@ const rpc = (fn, token, args) => api("POST", "/rest/v1/rpc/" + fn, { token, body
 const created = [];
 async function makeUser(label) {
   const email = `gl-test-${label}-${uid()}@example.com`;
+  if (!SERVICE) {
+    const password = "Gl!" + uid() + uid() + "9";
+    const su = await api("POST", "/auth/v1/signup", { body: { email, password } });
+    if (!su.ok || !su.data.access_token) throw new Error("signup failed (is the Email provider on with Confirm email OFF?): " + JSON.stringify(su.data));
+    return { id: su.data.user.id, email, token: su.data.access_token };
+  }
   const r = await api("POST", "/auth/v1/admin/users", { token: SERVICE, headers: { apikey: SERVICE }, body: { email, email_confirm: true } });
   if (!r.ok) throw new Error("create user failed: " + JSON.stringify(r.data));
   created.push(r.data.id);
@@ -32,6 +45,7 @@ async function makeUser(label) {
   return { id: r.data.id, email, token: ver.data.access_token };
 }
 async function cleanup() {
+  if (!SERVICE) return;
   for (const id of created) await api("DELETE", "/auth/v1/admin/users/" + id, { token: SERVICE, headers: { apikey: SERVICE } }).catch(() => {});
 }
 const entry = (id, amount) => ({ id, body: { kind: "cash", date: "2026-03-01", org: "Food Bank", amount, bankRecord: true, receiptIds: [] }, version: 1 });
@@ -114,12 +128,14 @@ const download = (token, path) => api("GET", "/storage/v1/object/authenticated/r
   const rename = await rest("PATCH", "households", alice.token, { name: "Alice & co" }, "id=eq." + hA, "return=representation");
   t("4: owner can still rename", rename.ok && rename.data.length === 1 && rename.data[0].name === "Alice & co", rename.data);
   // canceled household → read-only (set via service key, as a billing webhook would)
-  await api("PATCH", "/rest/v1/households?id=eq." + hA, { token: SERVICE, headers: { apikey: SERVICE, Prefer: "return=minimal" }, body: { plan_status: "canceled", canceled_at: new Date().toISOString() } });
-  const canceledWrite = await rest("POST", "entries", alice.token, [Object.assign({ household_id: hA }, entry("a9", 9))]);
-  const canceledRead = await rest("GET", "entries", alice.token, null, "household_id=eq." + hA + "&select=id");
-  t("4: canceled household → owner can still read", canceledRead.ok && canceledRead.data.length === 1);
-  t("4: canceled household → owner cannot add entries (retention = read-only)", !canceledWrite.ok, canceledWrite.data);
-  await api("PATCH", "/rest/v1/households?id=eq." + hA, { token: SERVICE, headers: { apikey: SERVICE, Prefer: "return=minimal" }, body: { plan_status: "beta", canceled_at: null } });
+  if (SERVICE) {
+    await api("PATCH", "/rest/v1/households?id=eq." + hA, { token: SERVICE, headers: { apikey: SERVICE, Prefer: "return=minimal" }, body: { plan_status: "canceled", canceled_at: new Date().toISOString() } });
+    const canceledWrite = await rest("POST", "entries", alice.token, [Object.assign({ household_id: hA }, entry("a9", 9))]);
+    const canceledRead = await rest("GET", "entries", alice.token, null, "household_id=eq." + hA + "&select=id");
+    t("4: canceled household → owner can still read", canceledRead.ok && canceledRead.data.length === 1);
+    t("4: canceled household → owner cannot add entries (retention = read-only)", !canceledWrite.ok, canceledWrite.data);
+    await api("PATCH", "/rest/v1/households?id=eq." + hA, { token: SERVICE, headers: { apikey: SERVICE, Prefer: "return=minimal" }, body: { plan_status: "beta", canceled_at: null } });
+  } else console.log("SKIP  4: canceled-household retention check needs the secret key");
 
   // ---- 5. migration retried: same entry ids → conflict, receipts keyed by source_id ----
   const mig1 = await rest("POST", "receipts", alice.token, [{ id: "m1", household_id: hA, name: "m.png", type: "image/png", size: 1, path: hA + "/m1", source_id: "local-1" }]);
@@ -146,9 +162,10 @@ const download = (token, path) => api("GET", "/storage/v1/object/authenticated/r
   const daveDl = await download(dave.token, hA + "/ra1");
   t("6: removed member cannot download receipts", !daveDl.ok, daveDl.status);
 
-  // ---- cleanup ----
-  await api("DELETE", "/rest/v1/households?id=in.(" + hA + "," + hB + ")", { token: SERVICE, headers: { apikey: SERVICE } });
-  await api("DELETE", "/storage/v1/object/receipts", { token: SERVICE, headers: { apikey: SERVICE }, body: { prefixes: [hA + "/ra1", hA + "/m1"] } }).catch(() => {});
+  // ---- cleanup (owners can delete their own households; files go with the owner's token) ----
+  await api("DELETE", "/storage/v1/object/receipts", { token: alice.token, body: { prefixes: [hA + "/ra1", hA + "/m1"] } }).catch(() => {});
+  await rest("DELETE", "households", alice.token, null, "id=eq." + hA);
+  await rest("DELETE", "households", bob.token, null, "id=eq." + hB);
   await cleanup();
   console.log(fails ? `\n${fails} FAILED` : "\nALL PASS");
   process.exit(fails ? 1 : 0);

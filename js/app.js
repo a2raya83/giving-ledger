@@ -108,7 +108,13 @@
     window.scrollTo({ top: 0 });
   }
   document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => showView(t.dataset.view)));
-  window.addEventListener("hashchange", () => { const v = location.hash.slice(1); if ($("view-" + v)) showView(v); });
+  window.addEventListener("hashchange", () => {
+    const v = location.hash.slice(1); if ($("view-" + v)) { showView(v); return; }
+    // An invitation link opened in a tab that already has the app loaded is just a hash change:
+    // handle it the same way a fresh load would.
+    const im = location.hash.match(/invite=([a-f0-9]+)/);
+    if (im && Cloud.configured) { try { sessionStorage.setItem("gl_invite", im[1]); } catch (e) {} if (Cloud.user()) afterSignIn(Cloud.user()); else accountModal(); }
+  });
 
   /* ---------- entry form ---------- */
   const form = $("entryForm");
@@ -641,6 +647,7 @@
     try { entries = await Cloud.selectHousehold(hh); }
     catch (e) { toast("Couldn't open the ledger: " + e.message, true); return false; }
     cloudMode = true;
+    $("modalRoot").innerHTML = "";                       // a household opened: close any pending prompt (e.g. "name your household")
     state = { entries, settings: { year: (() => { try { return localStorage.getItem("gl_year"); } catch (e) { return null; } })() || thisYear } };
     year = state.settings.year;
     try { localStorage.setItem("gl_household", hh.id); } catch (e) {}
@@ -769,9 +776,10 @@
   (async function init() {
     $("f_date").value = new Date().toISOString().slice(0, 10);
     setKind("cash"); updateExpenseVisibility();
+    // Read an invitation token BEFORE the view router rewrites the hash.
+    const im = location.hash.match(/invite=([a-f0-9]+)/); if (im) { try { sessionStorage.setItem("gl_invite", im[1]); } catch (e) {} }
     const v = location.hash.slice(1);
     showView($("view-" + v) ? v : "ledger");
-    const im = location.hash.match(/invite=([a-f0-9]+)/); if (im) { try { sessionStorage.setItem("gl_invite", im[1]); } catch (e) {} }
     // device-mode boot first so the page is usable immediately
     const orphans = await window.Store.cleanupOrphans(state).catch(() => 0);
     await refreshReceipts();
@@ -786,7 +794,10 @@
           onRemoteChange: entries => {
             const mine = editingId ? entries.find(e => e.id === editingId) : null;
             const before = editingId ? state.entries.find(e => e.id === editingId) : null;
+            const sigList = list => list.map(e => window.Store.signature(e)).sort().join("|");
+            const changed = sigList(Cloud.overlayPending(entries)) !== sigList(state.entries);
             state.entries = Cloud.overlayPending(entries); refreshReceipts().then(() => { renderYearPicker(); renderAll(); });
+            if (!changed) return;                                        // our own write echoing back: nothing to announce
             if (mine && before && window.Store.signature(mine) !== window.Store.signature(before)) toast("The entry you're editing was changed on another device. Saving will keep both versions for review.", true);
             else toast("Ledger updated from another device");
           },

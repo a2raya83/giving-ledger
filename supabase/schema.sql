@@ -216,6 +216,11 @@ create policy receipts_delete on storage.objects for delete
   using (bucket_id = 'receipts' and public.can_write((split_part(name, '/', 1))::uuid));
 
 -- ---------- realtime (live updates between devices) ----------
+-- Filtered realtime subscriptions (household_id=eq.…) only receive DELETE events when the table
+-- publishes the full old row; without this, a deletion on one device never reaches the others.
+alter table public.entries replica identity full;
+alter table public.receipts replica identity full;
+alter table public.household_members replica identity full;
 do $$ begin
   begin alter publication supabase_realtime add table public.entries; exception when duplicate_object then null; end;
   begin alter publication supabase_realtime add table public.receipts; exception when duplicate_object then null; end;

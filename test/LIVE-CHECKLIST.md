@@ -70,6 +70,31 @@ Use two email addresses you control: **A** (owner) and **B** (spouse).
       Accept. Expect a "Copied and verified" dialog with matching counts before any offer to remove
       the device copy. Decline removal once, reload, accept the offer again: no duplicates.
 
+## Results so far (test project giving-ledger-test, 2026-09-26)
+
+Automated live suite (no-secret mode): **39 pass, 1 skipped** (the canceled-plan retention check
+needs the secret key). Manual checks below were driven through the real UI in two browsers with two
+password test accounts, because magic-link email delivery is not set up yet (see "Still open").
+
+| Check | Result |
+|---|---|
+| First sign-in creates a household; reload keeps the session; Saved pill visible | pass |
+| Owner saves an entry with a photo receipt; receipt listed with a signed thumbnail | pass |
+| Invitation link opened by the invited account joins the household with entries and receipts | pass, after two fixes (token read before the router rewrote the hash; link opened in an already-loaded tab) |
+| Member can open the receipt via a short-lived signed link | pass |
+| Simultaneous edit: A saves while B's form is open → B's row updates live, B's draft keeps old values, B's save becomes a conflict copy, A's value stays, no double counting | pass |
+| Conflict resolved on A; B's ledger clears live | pass, after a schema fix (full replica identity so filtered DELETE events are delivered) |
+| Owner removes member → member's next save shows "Access removed", unsent change discarded, household gone from their list | pass |
+| Entry added on A appears on B live; deleted on A disappears on B live | pass |
+
+Still open:
+- **Magic-link email delivery is unverified.** A sign-in request for the owner's own address created
+  the user but no email arrived within ~15 minutes on Supabase's built-in sender. Custom SMTP
+  (Resend, verified sender) must be configured and this check repeated before any public sign-in.
+- Offline edit → reconnect was not exercised against the real backend (covered by the fake-client
+  suite only).
+- The canceled-plan retention check needs the secret key on your own terminal.
+
 ## 3. Then
 
 Send the reviewer the results of sections 1 and 2. If everything passes, flip the sign-up gate

@@ -6,6 +6,7 @@ const root = path.join(__dirname, "..");
 let h = fs.readFileSync(path.join(root, "index.html"), "utf8");
 h = h.replace(/href="css\//g, 'href="../css/').replace(/src="js\//g, 'src="../js/');
 h = h.replace(/<script src="https:\/\/cdn\.jsdelivr\.net\/npm\/@supabase\/supabase-js[^"]*"><\/script>\s*/, "");
+h = h.replace(/<script src="\.\.\/js\/config\.local\.js"><\/script>[^\n]*\n?/, "");   // no local overrides in the harness
 h = h.replace('<script src="../js/config.js"></script>', `<script src="fake-supabase.js"></script>
 <script>
   // Test harness: a fake Supabase client stands in for the real one. Nothing leaves this page.
